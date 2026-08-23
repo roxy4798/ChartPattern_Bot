@@ -1,0 +1,1 @@
+- [Python dependency setup](python-dependency-setup.md) — enable the Replit Python toolchain before installing imported project requirements.

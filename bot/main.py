@@ -44,10 +44,10 @@ async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier):
                         sig, pattern, reason = evaluate_symbol_timeframe(symbol, tf, df)
                         if sig is None or pattern is None:
                             continue
+                        chart_png = render_signal_chart(symbol, tf, df, pattern, sig)
                         inserted = await db.insert_signal(sig)
                         if not inserted:
                             continue
-                        chart_png = render_signal_chart(symbol, tf, df, pattern, sig)
                         text_id, chart_id = await notifier.send_signal(sig, reason, chart_png)
                         await db.set_telegram_ids(sig.id, message_id=text_id, chart_message_id=chart_id)
                         log.info("Signal: %s %s %s %s @ %.6g", symbol, tf, sig.direction.value, sig.pattern, sig.entry_price)

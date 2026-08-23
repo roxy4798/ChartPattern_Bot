@@ -5,6 +5,7 @@ resilient retries (network hiccups shouldn't kill the whole scan loop).
 """
 from __future__ import annotations
 import logging
+import numpy as np
 import pandas as pd
 from binance import AsyncClient
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -70,6 +71,17 @@ class BinanceMarket:
         df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
         # Drop the last (still-forming) candle.
         df = df.iloc[:-1].reset_index(drop=True)
+        if df.empty:
+            return df
+        ohlc = df[["open", "high", "low", "close"]].to_numpy()
+        malformed = (
+            df["open_time"].duplicated().any()
+            or not df["open_time"].is_monotonic_increasing
+            or not df["close_time"].is_monotonic_increasing
+            or not np.isfinite(ohlc).all()
+        )
+        if malformed or (ohlc[:, 1, None] < ohlc[:, [0, 3]]).any() or (ohlc[:, 2, None] > ohlc[:, [0, 3]]).any():
+            raise ValueError(f"Invalid or duplicated OHLC data returned for {symbol} {interval}")
         return df
 
     async def get_latest_closed_candle(self, symbol: str, interval: str) -> pd.Series | None:

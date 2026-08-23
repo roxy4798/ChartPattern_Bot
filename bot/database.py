@@ -96,6 +96,7 @@ class Database:
             await db.commit()
 
     async def update_status(self, signal_id: str, status: SignalStatus, *,
+                             expected_status: Optional[SignalStatus] = None,
                              hit_time: Optional[str] = None,
                              exit_price: Optional[float] = None,
                              exit_time: Optional[str] = None,
@@ -124,9 +125,14 @@ class Database:
                 sets.append("pnl_pct=?"); vals.append(pnl_pct)
             if duration_sec is not None:
                 sets.append("duration_sec=?"); vals.append(duration_sec)
+            where = "WHERE id=?"
             vals.append(signal_id)
-            await db.execute(f"UPDATE signals SET {', '.join(sets)} WHERE id=?", vals)
+            if expected_status is not None:
+                where += " AND status=?"
+                vals.append(expected_status.value)
+            cur = await db.execute(f"UPDATE signals SET {', '.join(sets)} {where}", vals)
             await db.commit()
+            return cur.rowcount == 1
 
     async def get_active_signals(self) -> list[Signal]:
         async with self._conn() as db:

@@ -79,19 +79,25 @@ async def check_signal(market: BinanceMarket, db: Database, notifier: Notifier, 
         if sl_touched and target_touched:
             # Ambiguous ordering within one candle: assume SL first (conservative).
             status = SignalStatus.SL_HIT
-            await _resolve_sl(db, notifier, signal, candle_time)
+            if await _resolve_sl(db, notifier, signal, candle_time, signal.status):
+                break
             break
         elif sl_touched:
             status = SignalStatus.SL_HIT
-            await _resolve_sl(db, notifier, signal, candle_time)
+            await _resolve_sl(db, notifier, signal, candle_time, signal.status)
             break
         elif target_touched:
             status = next_target_status
             price = getattr(signal, next_target_field)
-            await db.update_status(signal.id, status, hit_time=candle_time)
+            updated = await db.update_status(
+                signal.id, status, expected_status=signal.status, hit_time=candle_time
+            )
+            if not updated:
+                log.info("Skipped stale target transition for %s; state changed concurrently", signal.id)
+                break
             signal.status = status
             if status == SignalStatus.TP3_HIT:
-                await _resolve_tp3(db, notifier, signal, candle_time, price)
+                await _resolve_tp3(db, notifier, signal, candle_time, price, SignalStatus.TP3_HIT)
                 status = SignalStatus.CLOSED
                 break
             else:
@@ -99,28 +105,38 @@ async def check_signal(market: BinanceMarket, db: Database, notifier: Notifier, 
             # continue scanning subsequent candles for further hits
 
 
-async def _resolve_sl(db: Database, notifier: Notifier, signal: Signal, hit_time: str):
+async def _resolve_sl(db: Database, notifier: Notifier, signal: Signal, hit_time: str,
+                      expected_status: SignalStatus) -> bool:
     pnl = _pnl_pct(signal.entry_price, signal.stop_loss, signal.direction)
     duration = int((pd.Timestamp(hit_time) - pd.Timestamp(signal.signal_time)).total_seconds())
-    await db.update_status(
+    updated = await db.update_status(
         signal.id, SignalStatus.SL_HIT, hit_time=hit_time, exit_price=signal.stop_loss,
         exit_time=hit_time, result="LOSS", pnl_pct=pnl, duration_sec=duration,
+        expected_status=expected_status,
     )
+    if not updated:
+        log.info("Skipped stale SL transition for %s; state changed concurrently", signal.id)
+        return False
     signal.status = SignalStatus.SL_HIT
     signal.exit_price = signal.stop_loss
     signal.pnl_pct = pnl
     signal.duration_sec = duration
     await notifier.send_update(signal, "SL_HIT", signal.stop_loss)
     await notifier.send_closed(signal, "LOSS")
+    return True
 
 
-async def _resolve_tp3(db: Database, notifier: Notifier, signal: Signal, hit_time: str, price: float):
+async def _resolve_tp3(db: Database, notifier: Notifier, signal: Signal, hit_time: str,
+                       price: float, expected_status: SignalStatus):
     pnl = _pnl_pct(signal.entry_price, price, signal.direction)
     duration = int((pd.Timestamp(hit_time) - pd.Timestamp(signal.signal_time)).total_seconds())
-    await db.update_status(
+    updated = await db.update_status(
         signal.id, SignalStatus.CLOSED, exit_price=price, exit_time=hit_time,
-        result="WIN", pnl_pct=pnl, duration_sec=duration,
+        result="WIN", pnl_pct=pnl, duration_sec=duration, expected_status=expected_status,
     )
+    if not updated:
+        log.info("Skipped stale TP3 transition for %s; state changed concurrently", signal.id)
+        return
     signal.status = SignalStatus.CLOSED
     signal.exit_price = price
     signal.pnl_pct = pnl

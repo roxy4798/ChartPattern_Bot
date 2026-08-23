@@ -8,16 +8,36 @@ from bot.config import settings
 from bot.indicators import ema, atr, find_pivots
 from bot.patterns import detect_all
 from bot.models import Signal, Direction, SignalStatus, PatternResult
+from bot.chart_generator import describe_confirmation
 
 log = logging.getLogger("signal_engine")
 
 
-def _reason(pattern: PatternResult, ema200: float, price: float) -> str:
+def _validate_signal(signal: Signal, pattern: PatternResult) -> None:
+    prices = (signal.entry_price, signal.stop_loss, signal.tp1, signal.tp2, signal.tp3,
+              signal.ema200_at_signal, signal.price_at_signal)
+    if not all(pd.notna(price) and pd.api.types.is_number(price) for price in prices):
+        raise ValueError("Signal contains a non-numeric price")
+    if signal.direction == Direction.LONG:
+        valid_order = signal.stop_loss < signal.entry_price < signal.tp1 <= signal.tp2 <= signal.tp3
+    else:
+        valid_order = signal.stop_loss > signal.entry_price > signal.tp1 >= signal.tp2 >= signal.tp3
+    if not valid_order:
+        raise ValueError(f"Invalid {signal.direction.value} entry/SL/TP ordering for {signal.symbol} {signal.timeframe}")
+    if signal.pattern != pattern.name or signal.direction != (
+        Direction.LONG if pattern.is_bullish else Direction.SHORT
+    ):
+        raise ValueError("Signal identity does not match detected pattern")
+
+
+def _reason(pattern: PatternResult, ema200: float, price: float, candle: pd.Series) -> str:
     side = "above" if price > ema200 else "below"
     bias = "Bullish" if pattern.is_bullish else "Bearish"
+    confirmation = describe_confirmation(candle, pattern.is_bullish)
     return (f"{bias} {pattern.name} confirmed by a closed-candle breakout, "
             f"with price trading {side} EMA200 ({price:.6g} vs {ema200:.6g}), "
-            f"aligning trend and structure for this direction.")
+            f"aligning trend and structure for this direction. "
+            f"Confirmation (informational only): {confirmation}.")
 
 
 def evaluate_symbol_timeframe(symbol: str, timeframe: str, df: pd.DataFrame) -> tuple[Signal | None, PatternResult | None, str | None]:
@@ -73,5 +93,6 @@ def evaluate_symbol_timeframe(symbol: str, timeframe: str, df: pd.DataFrame) -> 
         signal_time=datetime.now(timezone.utc).isoformat(),
         status=SignalStatus.ACTIVE,
     )
-    reason = _reason(pattern, ema_last, last_close)
+    _validate_signal(signal, pattern)
+    reason = _reason(pattern, ema_last, last_close, df.iloc[-1])
     return signal, pattern, reason

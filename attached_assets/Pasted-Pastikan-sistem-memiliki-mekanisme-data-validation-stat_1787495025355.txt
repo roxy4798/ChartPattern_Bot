@@ -1,0 +1,32 @@
+Pastikan sistem memiliki mekanisme **data validation, state management, synchronization, deduplication, idempotency, concurrency control, race-condition prevention, retry mechanism, timeout handling, exception handling, dan recovery mechanism** yang memadai.
+
+Setiap proses harus menggunakan **single source of truth** dan state yang konsisten sehingga tidak terjadi perbedaan antara data yang digunakan untuk analisis, data yang menghasilkan sinyal, data yang digunakan untuk perhitungan entry/SL/TP, status posisi, hasil eksekusi, dan informasi yang ditampilkan pada Telegram.
+
+Pastikan tidak terjadi:
+
+* Duplicate signal atau duplicate execution
+* Race condition
+* Double processing
+* Stale data
+* Desynchronization antar-komponen
+* Konflik state
+* Perhitungan indikator atau harga yang tidak konsisten
+* Perbedaan data antara scanner, signal engine, execution engine, dan Telegram
+* False signal akibat data yang belum valid atau belum lengkap
+* Pesan Telegram yang tidak sesuai dengan kondisi sistem sebenarnya
+* TP/SL atau status posisi yang salah
+* Eksekusi berulang akibat retry atau reconnect
+* Kehilangan state setelah restart, reconnect, atau error
+* Silent failure yang tidak terdeteksi
+
+Setiap data yang masuk harus divalidasi sebelum digunakan. Setiap sinyal harus melalui validasi sebelum diproses lebih lanjut. Setiap perubahan state harus dilakukan secara atomic dan tercatat dengan jelas. Setiap retry harus aman dan tidak boleh menyebabkan duplicate processing atau duplicate execution.
+
+Pastikan timestamp, candle, symbol, timeframe, harga, indikator, signal ID, position state, order state, dan seluruh parameter terkait selalu mengacu pada data yang benar dan konsisten.
+
+Telegram harus selalu merepresentasikan **kondisi sistem yang sebenarnya**, bukan asumsi atau data lama. Jika terjadi perubahan state, error, partial failure, reconnect, atau recovery, status Telegram harus diperbarui secara konsisten dan tidak boleh menampilkan informasi yang sudah stale.
+
+Tambahkan logging dan diagnostic information yang cukup untuk melakukan tracing setiap proses dari **data ingestion → validation → indicator calculation → signal detection → signal validation → risk calculation → execution → position management → TP/SL → state update → Telegram notification**.
+
+Sebelum dianggap selesai, lakukan pemeriksaan menyeluruh terhadap seluruh sistem untuk menemukan dan memperbaiki potensi bug, konflik antar-modul, ketidakkonsistenan state, race condition, duplicate processing, calculation mismatch, dan synchronization issue.
+
+**Prioritas utama adalah correctness, consistency, reliability, fault tolerance, dan synchronization. Jangan hanya memastikan sistem berjalan tanpa error; pastikan hasil yang dihasilkan setiap komponen benar-benar konsisten satu sama lain dari awal hingga akhir.**
