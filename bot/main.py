@@ -80,6 +80,18 @@ async def run():
     notifier = Notifier(app, settings.telegram_chat_id)
 
     await app.initialize()
+    try:
+        await app.bot.set_my_commands([
+            ("start", "Open the NeoElla Trade welcome guide"),
+            ("help", "Show all available commands"),
+            ("status", "Show bot and tracking status"),
+            ("active", "Show open signals and targets"),
+            ("history", "Show recent signal history"),
+            ("stats", "Show performance summary"),
+            ("performance", "Show detailed performance report"),
+        ])
+    except Exception:
+        log.exception("Could not register Telegram command menu; continuing startup")
     await app.start()
     await app.updater.start_polling()
     await notifier.flush_notifications(db)
