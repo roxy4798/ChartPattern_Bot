@@ -7,6 +7,7 @@ without losing active signals.
 from __future__ import annotations
 import aiosqlite
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from typing import Optional
 from bot.models import Signal, SignalStatus, Direction
@@ -44,6 +45,19 @@ CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status);
 CREATE INDEX IF NOT EXISTS idx_signals_symbol_tf ON signals(symbol, timeframe);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_dedup
     ON signals(symbol, timeframe, pattern, signal_time);
+CREATE TABLE IF NOT EXISTS notification_outbox (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id    TEXT NOT NULL,
+    event_key    TEXT NOT NULL UNIQUE,
+    kind         TEXT NOT NULL,
+    payload      TEXT NOT NULL,
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    last_error   TEXT,
+    delivered_at TEXT,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_pending
+    ON notification_outbox(delivered_at, id);
 """
 
 _lock = asyncio.Lock()  # serialize writes; sqlite handles one writer well
@@ -97,6 +111,7 @@ class Database:
 
     async def update_status(self, signal_id: str, status: SignalStatus, *,
                              expected_status: Optional[SignalStatus] = None,
+                             notifications: Optional[list[dict]] = None,
                              hit_time: Optional[str] = None,
                              exit_price: Optional[float] = None,
                              exit_time: Optional[str] = None,
@@ -131,8 +146,59 @@ class Database:
                 where += " AND status=?"
                 vals.append(expected_status.value)
             cur = await db.execute(f"UPDATE signals SET {', '.join(sets)} {where}", vals)
+            if cur.rowcount == 1 and notifications:
+                for notification in notifications:
+                    event_key = notification["event_key"]
+                    await db.execute(
+                        """INSERT OR IGNORE INTO notification_outbox
+                           (signal_id, event_key, kind, payload, created_at)
+                           VALUES (?, ?, ?, ?, datetime('now'))""",
+                        (signal_id, event_key, notification["kind"],
+                         json.dumps(notification["payload"])),
+                    )
             await db.commit()
             return cur.rowcount == 1
+
+    async def get_pending_notifications(self, limit: int = 50) -> list[dict]:
+        async with self._conn() as db:
+            cur = await db.execute(
+                """SELECT id, signal_id, kind, payload, attempts
+                   FROM notification_outbox
+                   WHERE delivered_at IS NULL
+                   ORDER BY id LIMIT ?""", (limit,)
+            )
+            rows = await cur.fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "signal_id": row["signal_id"],
+                    "kind": row["kind"],
+                    "payload": json.loads(row["payload"]),
+                    "attempts": row["attempts"],
+                }
+                for row in rows
+            ]
+
+    async def mark_notification_delivered(self, notification_id: int) -> bool:
+        async with _lock, self._conn() as db:
+            cur = await db.execute(
+                """UPDATE notification_outbox
+                   SET delivered_at=datetime('now')
+                   WHERE id=? AND delivered_at IS NULL""",
+                (notification_id,),
+            )
+            await db.commit()
+            return cur.rowcount == 1
+
+    async def mark_notification_failed(self, notification_id: int, error: str):
+        async with _lock, self._conn() as db:
+            await db.execute(
+                """UPDATE notification_outbox
+                   SET attempts=attempts+1, last_error=?
+                   WHERE id=? AND delivered_at IS NULL""",
+                (error[:500], notification_id),
+            )
+            await db.commit()
 
     async def get_active_signals(self) -> list[Signal]:
         async with self._conn() as db:
@@ -142,6 +208,12 @@ class Database:
             )
             rows = await cur.fetchall()
             return [self._row_to_signal(r) for r in rows]
+
+    async def get_signal(self, signal_id: str) -> Optional[Signal]:
+        async with self._conn() as db:
+            cur = await db.execute("SELECT * FROM signals WHERE id=?", (signal_id,))
+            row = await cur.fetchone()
+            return self._row_to_signal(row) if row else None
 
     async def get_recent_signals(self, limit: int = 20) -> list[Signal]:
         async with self._conn() as db:

@@ -117,6 +117,26 @@ class Notifier:
         text = build_closed_message(s, result)
         await self.app.bot.send_message(chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML)
 
+    async def flush_notifications(self, db: Database):
+        """Deliver persisted state events in order; failures remain retryable."""
+        for item in await db.get_pending_notifications():
+            try:
+                signal = await db.get_signal(item["signal_id"])
+                if signal is None:
+                    raise ValueError(f"Signal {item['signal_id']} no longer exists")
+                payload = item["payload"]
+                if item["kind"] == "update":
+                    await self.send_update(signal, payload["event"], payload["price"])
+                elif item["kind"] == "closed":
+                    await self.send_closed(signal, payload["result"])
+                else:
+                    raise ValueError(f"Unknown notification kind: {item['kind']}")
+                await db.mark_notification_delivered(item["id"])
+            except Exception as exc:
+                await db.mark_notification_failed(item["id"], repr(exc))
+                log.exception("Notification delivery failed for outbox item %s", item["id"])
+                break
+
 
 def _bucket_line(name: str, b: Bucket) -> str:
     return f"{name} → {b.winrate:.0f}% WR | {b.total_pnl:+.2f}% PnL ({b.signals} signals)"

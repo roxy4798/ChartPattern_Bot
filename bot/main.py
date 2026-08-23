@@ -82,6 +82,7 @@ async def run():
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
+    await notifier.flush_notifications(db)
     log.info("Telegram bot started. Resuming any ACTIVE signals from previous run...")
 
     active = await db.get_active_signals()

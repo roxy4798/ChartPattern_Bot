@@ -90,7 +90,12 @@ async def check_signal(market: BinanceMarket, db: Database, notifier: Notifier, 
             status = next_target_status
             price = getattr(signal, next_target_field)
             updated = await db.update_status(
-                signal.id, status, expected_status=signal.status, hit_time=candle_time
+                signal.id, status, expected_status=signal.status, hit_time=candle_time,
+                notifications=[{
+                    "event_key": f"{signal.id}:{status.value}:{candle_time}",
+                    "kind": "update",
+                    "payload": {"event": status.value, "price": price},
+                }],
             )
             if not updated:
                 log.info("Skipped stale target transition for %s; state changed concurrently", signal.id)
@@ -100,8 +105,6 @@ async def check_signal(market: BinanceMarket, db: Database, notifier: Notifier, 
                 await _resolve_tp3(db, notifier, signal, candle_time, price, SignalStatus.TP3_HIT)
                 status = SignalStatus.CLOSED
                 break
-            else:
-                await notifier.send_update(signal, status.value, price)
             # continue scanning subsequent candles for further hits
 
 
@@ -113,6 +116,12 @@ async def _resolve_sl(db: Database, notifier: Notifier, signal: Signal, hit_time
         signal.id, SignalStatus.SL_HIT, hit_time=hit_time, exit_price=signal.stop_loss,
         exit_time=hit_time, result="LOSS", pnl_pct=pnl, duration_sec=duration,
         expected_status=expected_status,
+        notifications=[
+            {"event_key": f"{signal.id}:SL_HIT:{hit_time}", "kind": "update",
+             "payload": {"event": "SL_HIT", "price": signal.stop_loss}},
+            {"event_key": f"{signal.id}:CLOSED:LOSS:{hit_time}", "kind": "closed",
+             "payload": {"result": "LOSS"}},
+        ],
     )
     if not updated:
         log.info("Skipped stale SL transition for %s; state changed concurrently", signal.id)
@@ -121,8 +130,6 @@ async def _resolve_sl(db: Database, notifier: Notifier, signal: Signal, hit_time
     signal.exit_price = signal.stop_loss
     signal.pnl_pct = pnl
     signal.duration_sec = duration
-    await notifier.send_update(signal, "SL_HIT", signal.stop_loss)
-    await notifier.send_closed(signal, "LOSS")
     return True
 
 
@@ -133,6 +140,10 @@ async def _resolve_tp3(db: Database, notifier: Notifier, signal: Signal, hit_tim
     updated = await db.update_status(
         signal.id, SignalStatus.CLOSED, exit_price=price, exit_time=hit_time,
         result="WIN", pnl_pct=pnl, duration_sec=duration, expected_status=expected_status,
+        notifications=[{
+            "event_key": f"{signal.id}:CLOSED:WIN:{hit_time}",
+            "kind": "closed", "payload": {"result": "WIN"},
+        }],
     )
     if not updated:
         log.info("Skipped stale TP3 transition for %s; state changed concurrently", signal.id)
@@ -141,7 +152,6 @@ async def _resolve_tp3(db: Database, notifier: Notifier, signal: Signal, hit_tim
     signal.exit_price = price
     signal.pnl_pct = pnl
     signal.duration_sec = duration
-    await notifier.send_closed(signal, "WIN")
 
 
 async def run_tracker_once(market: BinanceMarket, db: Database, notifier: Notifier):
@@ -151,3 +161,4 @@ async def run_tracker_once(market: BinanceMarket, db: Database, notifier: Notifi
             await check_signal(market, db, notifier, signal)
         except Exception:
             log.exception("Tracker failed for %s %s (%s)", signal.symbol, signal.timeframe, signal.id)
+    await notifier.flush_notifications(db)
