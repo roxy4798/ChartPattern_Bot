@@ -1,0 +1,178 @@
+Tambahkan juga spesifikasi khusus untuk **chart yang dikirim ke Telegram** agar tampil lebih premium, profesional, informatif, dan memiliki branding **NeoElla Trade** yang kuat.
+
+### 1. Watermark NeoElla Trade
+
+Tambahkan watermark **“NeoElla Trade”** di bagian tengah chart sebagai identitas/branding.
+
+Watermark harus:
+
+* Terlihat jelas tetapi tetap elegan dan tidak mengganggu pembacaan chart.
+* Menggunakan font modern, clean, premium, dan profesional.
+* Memiliki ukuran, opacity, dan transparansi yang proporsional.
+* Ditempatkan di area tengah chart dengan positioning yang tepat.
+* Tidak menutupi informasi penting seperti candlestick, pattern, Entry, SL, dan TP.
+* Tetap terlihat jelas ketika chart dikirim melalui Telegram.
+* Dibuat cukup kuat sebagai branding agar chart tidak mudah digunakan ulang oleh pihak lain tanpa izin.
+* Menggunakan style yang konsisten pada seluruh timeframe dan seluruh signal.
+* Sesuaikan font, weight, spacing, opacity, dan placement agar memberikan kesan **professional trading platform / premium market analysis**.
+
+### 2. Chart Pattern Wajib Terlihat
+
+Pastikan **garis dan struktur chart pattern yang terdeteksi benar-benar digambar pada chart**, bukan hanya menampilkan nama pattern.
+
+Tampilkan secara visual sesuai jenis pattern:
+
+* Trendline pattern.
+* Support/resistance.
+* Swing high / swing low yang relevan.
+* Pattern boundary.
+* Breakout/breakdown level jika ada.
+* Area atau struktur pattern.
+* Label nama pattern.
+
+Garis pattern harus mengikuti titik harga/candle yang sebenarnya.
+
+Jangan sampai terjadi:
+
+* Garis pattern melayang.
+* Garis tidak terhubung dengan titik pattern.
+* Pattern bergeser dari candle sebenarnya.
+* Garis terpotong secara tidak wajar.
+* Pattern yang digambar berbeda dengan pattern yang dideteksi oleh signal engine.
+
+### 3. Entry, Stop Loss, dan Take Profit
+
+Tampilkan seluruh level trading secara jelas pada chart.
+
+**ENTRY**
+
+* Garis horizontal Entry.
+* Label `ENTRY`.
+* Harga Entry.
+
+**STOP LOSS**
+
+* Garis horizontal SL.
+* Label `SL`.
+* Harga Stop Loss.
+
+**TAKE PROFIT**
+
+* Garis TP1.
+* Garis TP2.
+* Garis TP3.
+* Label masing-masing target.
+* Harga masing-masing target.
+
+Semua level tersebut harus berasal dari **data signal yang sama** dengan yang dikirim dalam pesan Telegram dan disimpan di database.
+
+Jangan sampai chart menampilkan Entry/SL/TP yang berbeda dengan pesan Telegram.
+
+### 4. Confirmation Candle
+
+Tambahkan juga informasi mengenai **confirmation candle**, tetapi **JANGAN menjadikannya sebagai filter tambahan yang menentukan apakah signal boleh muncul atau tidak**.
+
+Confirmation candle hanya berfungsi sebagai **informasi/visualisasi tambahan** untuk membantu pengguna memahami kondisi saat signal muncul.
+
+Tampilkan pada chart:
+
+* Candle yang dianggap sebagai confirmation candle.
+* Marker/highlight pada candle tersebut.
+* Label seperti `CONFIRMATION CANDLE`.
+* Jika relevan, jelaskan jenisnya, misalnya:
+
+  * Bullish Confirmation
+  * Bearish Confirmation
+  * Breakout Candle
+  * Breakdown Candle
+  * Rejection Candle
+  * Strong Momentum Candle
+  * Weak Confirmation
+  * Possible Fakeout
+
+Namun, **jangan membuat signal batal hanya karena confirmation candle dianggap lemah**.
+
+Contohnya:
+
+> Pattern terdeteksi + posisi sesuai EMA 200 → signal tetap dapat muncul.
+
+Kemudian confirmation candle hanya memberikan informasi tambahan:
+
+> Confirmation: Weak Bullish Candle
+> atau
+> Confirmation: Possible Fakeout Risk
+
+Dengan demikian, confirmation candle **bukan hard filter**, melainkan **informational analysis layer**.
+
+Jika terdapat indikasi fakeout, jangan mengubah signal secara otomatis menjadi invalid. Cukup berikan informasi/risk note seperti:
+
+> ⚠️ Confirmation: Possible Fakeout
+
+atau:
+
+> ⚠️ Breakout detected, but confirmation strength is weak.
+
+Tujuannya agar pengguna mendapatkan informasi tambahan tanpa mengurangi jumlah signal hanya karena filter confirmation candle yang terlalu ketat.
+
+### 5. Kualitas Visual Chart
+
+Chart harus dibuat dengan library/charting engine yang profesional dan stabil.
+
+Pastikan hasil akhir:
+
+* Candlestick tidak cacat.
+* Wick candle terlihat dengan benar.
+* Tidak ada candle duplicate.
+* Tidak ada candle yang hilang secara tidak wajar.
+* Timeframe akurat.
+* Harga tidak terdistorsi.
+* EMA 200 akurat.
+* Pattern line akurat.
+* Entry line akurat.
+* SL line akurat.
+* TP1/TP2/TP3 akurat.
+* Confirmation candle berada pada candle yang benar.
+* Label tidak bertabrakan.
+* Text tidak keluar dari canvas.
+* Watermark tidak mengganggu informasi utama.
+* Chart tidak terlalu penuh.
+* Semua elemen memiliki spacing yang rapi.
+* Resolusi cukup tinggi sehingga tetap tajam ketika dikirim ke Telegram.
+
+### 6. Konsistensi Data
+
+Pastikan seluruh elemen chart berasal dari **satu sumber/state signal yang konsisten**:
+
+**Market Data → Pattern Detection → EMA 200 → Signal → Entry/SL/TP → Chart Rendering → Telegram**
+
+Jangan menghitung ulang Entry, SL, TP, atau pattern secara berbeda ketika membuat chart.
+
+Dengan demikian:
+
+**Signal Telegram = Chart = Database = Tracking Result**
+
+harus selalu sama.
+
+### 7. Final Quality Control
+
+Sebelum chart dikirim ke Telegram, lakukan validasi otomatis untuk memastikan:
+
+* Symbol benar.
+* Timeframe benar.
+* Pattern benar.
+* EMA 200 benar.
+* Pattern lines benar.
+* Confirmation candle benar.
+* Entry benar.
+* SL benar.
+* TP1 benar.
+* TP2 benar.
+* TP3 benar.
+* Watermark `NeoElla Trade` muncul.
+* Semua label berada di dalam canvas.
+* Tidak ada elemen yang overlap secara tidak wajar.
+* PNG berhasil dibuat dan tidak corrupt.
+
+Jika rendering gagal atau chart terlihat tidak valid/cacat, **jangan kirim chart tersebut ke Telegram**. Lakukan regenerate/retry terlebih dahulu dan catat error pada log.
+
+**Hasil akhir yang diinginkan adalah chart trading profesional dengan branding NeoElla Trade yang kuat, chart pattern yang benar-benar tergambar, EMA 200, Entry, SL, TP1/TP2/TP3, serta confirmation candle sebagai informasi tambahan. Confirmation candle, fakeout, rejection, dan strength analysis tidak boleh dijadikan hard filter yang membatasi munculnya signal, melainkan hanya menjadi informasi tambahan agar pengguna dapat memahami kualitas dan kondisi signal dengan lebih baik.**
