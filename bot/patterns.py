@@ -335,8 +335,11 @@ def detect_flag_pennant(df, atr_series, ph: list[Pivot], pl: list[Pivot], price:
     """Bullish Flag & Pennant -> Bullish Breakout (LONG ONLY)."""
     if len(ph) < 2 or len(pl) < 2:
         return None
+    last = len(df) - 1
     h1, h2, l1, l2 = ph[0], ph[1], pl[0], pl[1]
     start_bar = min(h2.index, l2.index)
+    if (last - start_bar) < settings.structural_min_span:
+        return None
     pole_len = min(200, len(df) - start_bar)
     if pole_len < 3:
         return None
@@ -347,7 +350,6 @@ def detect_flag_pennant(df, atr_series, ph: list[Pivot], pl: list[Pivot], price:
     slope_u = (h1.price - h2.price) / max(1, h1.index - h2.index)
     slope_l = (l1.price - l2.price) / max(1, l1.index - l2.index)
     parallel = is_near(slope_u, slope_l, 0.25) if slope_u and slope_l else abs(slope_u - slope_l) < 1e-9
-    last = len(df) - 1
 
     # Bullish Flag/Pennant ONLY: downward consolidation after bullish impulse
     if slope_u < 0 and slope_l < 0:
@@ -381,9 +383,11 @@ def detect_double(df, atr_series, ph: list[Pivot], pl: list[Pivot], price: float
     """Double Bottom -> Bullish Breakout (LONG ONLY)."""
     if len(pl) >= 2 and len(ph) >= 1:
         p1, p2, mid = pl[0], pl[1], ph[0]
+        last = len(df) - 1
+        if (last - p2.index) < settings.structural_min_span:
+            return None
         if p1.index > mid.index > p2.index and is_near(p1.price, p2.price, settings.lvl_tol):
             height = mid.price - (p1.price + p2.price) / 2
-            last = len(df) - 1
             if _valid_size(height, price, atr_val) and _breakout_ok(df, atr_series, mid.index, mid.price, last, mid.price, True, recent_ref_idx=mid.index):
                 entry = _entry_price(df)
                 target = mid.price + height
@@ -407,12 +411,14 @@ def detect_triple(df, atr_series, ph: list[Pivot], pl: list[Pivot], price: float
     """Triple Bottom -> Bullish Breakout (LONG ONLY)."""
     if len(pl) >= 3 and len(ph) >= 2:
         l1, l2, l3, h1, h2 = pl[0], pl[1], pl[2], ph[0], ph[1]
+        last = len(df) - 1
+        if (last - l3.index) < settings.structural_min_span:
+            return None
         if l1.index > h1.index > l2.index > h2.index > l3.index:
             if is_near(l1.price, l2.price, settings.lvl_tol) and is_near(l2.price, l3.price, settings.lvl_tol):
                 neck = max(h1.price, h2.price)
                 bot = min(l1.price, l2.price, l3.price)
                 height = neck - bot
-                last = len(df) - 1
                 if _valid_size(height, price, atr_val) and _breakout_ok(df, atr_series, h2.index, neck, last, neck, True, recent_ref_idx=h1.index):
                     entry = _entry_price(df)
                     target = neck + height
@@ -436,11 +442,13 @@ def detect_head_shoulders(df, atr_series, ph: list[Pivot], pl: list[Pivot], pric
     """Inverse Head & Shoulders -> Bullish Breakout (LONG ONLY)."""
     if len(pl) >= 3 and len(ph) >= 2:
         rs, head, ls, neck_r, neck_l = pl[0], pl[1], pl[2], ph[0], ph[1]
+        last = len(df) - 1
+        if (last - ls.index) < settings.structural_min_span:
+            return None
         if rs.index > neck_r.index > head.index > neck_l.index > ls.index:
             if head.price < rs.price and head.price < ls.price and is_near(ls.price, rs.price, settings.sym_tol):
                 neck_avg = (neck_r.price + neck_l.price) / 2
                 height = neck_avg - head.price
-                last = len(df) - 1
                 if _valid_size(height, price, atr_val) and _breakout_ok(df, atr_series, neck_l.index, neck_l.price, neck_r.index, neck_r.price, True, recent_ref_idx=neck_r.index):
                     entry = _entry_price(df)
                     neck_at_break = project(neck_l.index, neck_l.price, neck_r.index, neck_r.price, last)
@@ -465,19 +473,21 @@ def detect_rectangle(df, atr_series, ph: list[Pivot], pl: list[Pivot], price: fl
     """Horizontal Consolidation -> Bullish Breakout (LONG ONLY)."""
     if len(ph) < 2 or len(pl) < 2:
         return None
+    last = len(df) - 1
     h1, h2, l1, l2 = ph[0], ph[1], pl[0], pl[1]
+    start = min(h2.index, l2.index)
+    if (last - start) < settings.structural_min_span:
+        return None
     slope_u = (h1.price - h2.price) / max(1, h1.index - h2.index)
     slope_l = (l1.price - l2.price) / max(1, l1.index - l2.index)
     flat_tol = atr_val * 0.08
     if abs(slope_u) >= flat_tol or abs(slope_l) >= flat_tol:
         return None
-    start = min(h2.index, l2.index)
     top = (h1.price + h2.price) / 2
     bot = (l1.price + l2.price) / 2
     height = top - bot
     if not _valid_size(height, price, atr_val):
         return None
-    last = len(df) - 1
     # Bullish breakout above rectangle top
     if _breakout_ok(df, atr_series, start, top, last, top, True, recent_ref_idx=h1.index):
         entry = _entry_price(df)
@@ -505,6 +515,8 @@ def detect_cup_handle(df, atr_series, ph: list[Pivot], pl: list[Pivot], price: f
     last = len(df) - 1
     h_rim, h_left = ph[0], ph[1]
     l_handle, l_bot = pl[0], pl[1]
+    if (last - h_left.index) < settings.structural_min_span:
+        return None
     if l_handle.index > h_rim.index > l_bot.index > h_left.index:
         if is_near(h_rim.price, h_left.price, settings.sym_tol) and l_bot.price < l_handle.price < h_rim.price:
             cup_h = h_rim.price - l_bot.price

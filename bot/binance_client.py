@@ -117,7 +117,8 @@ class CandleCache:
         if interval.lower() == "1d":
             # Start of current UTC day
             today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-            if entry.latest_close_time >= today_start:
+            # Binance close_time is 23:59:59.999. Adding 1 second brings it to next day 00:00:00.
+            if (entry.latest_close_time + timedelta(seconds=1)) >= today_start:
                 # Latest closed candle is yesterday's close (closed today at 00:00 UTC)
                 return entry.df.copy()
             # If not yet closed or older, check age
