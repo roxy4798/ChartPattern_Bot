@@ -44,10 +44,18 @@ class Settings:
     custom_symbols: tuple = tuple(
         s.strip().upper() for s in os.getenv("CUSTOM_SYMBOLS", "").split(",") if s.strip()
     )
-    max_symbols: int = _int("MAX_SYMBOLS", 40)  # 0 = no cap; start small locally
+    max_symbols: int = _int("MAX_SYMBOLS", 0)  # 0 = no cap (all coins on Binance Futures)
+
 
     # --- Timeframes to scan (Binance kline intervals) ---
-    timeframes: tuple = ("1d", "4h", "1h", "15m")
+    timeframes: tuple = ("1d", "3d", "1w")
+
+
+    # --- Long Structural Trendline Parameters ---
+    trendline_min_touches: int = _int("TRENDLINE_MIN_TOUCHES", 2)
+    trendline_touch_tol_atr: float = _float("TRENDLINE_TOUCH_TOL_ATR", 0.40)
+    major_pivot_lb: int = _int("MAJOR_PIVOT_LB", 15)
+    medium_pivot_lb: int = _int("MEDIUM_PIVOT_LB", 8)
 
     # --- Pivot / pattern detection (mirrors the Pine Script inputs) ---
     lb_left: int = _int("LB_LEFT", 10)
@@ -68,8 +76,12 @@ class Settings:
 
     # --- Risk management ---
     min_rr: float = _float("MIN_RR", 1.0)
-    sl_pct_of_target_dist: float = _float("SL_PCT_TARGET_DIST", 25.0) / 100
-    tp1_fraction: float = _float("TP1_FRACTION", 0.5)   # fraction of measured move
+    sl_pct_of_target_dist: float = _float("SL_PCT_TARGET_DIST", 50.0) / 100  # 50% of target distance for wide breathing room
+    use_r_multiple_tp: bool = _bool("USE_R_MULTIPLE_TP", True)
+    tp1_r_multiple: float = _float("TP1_R_MULT", 1.0)   # 1.0x Risk (1:1 R:R)
+    tp2_r_multiple: float = _float("TP2_R_MULT", 2.0)   # 2.0x Risk (1:2 R:R)
+    tp3_r_multiple: float = _float("TP3_R_MULT", 3.0)   # 3.0x Risk (1:3 R:R)
+    tp1_fraction: float = _float("TP1_FRACTION", 0.5)   # fallback fraction of measured move
     tp2_fraction: float = _float("TP2_FRACTION", 1.0)
     tp3_fraction: float = _float("TP3_FRACTION", 1.5)
     taker_fee_pct: float = _float("TAKER_FEE_PCT", 0.04) / 100  # per side
@@ -81,18 +93,47 @@ class Settings:
     scan_interval_sec: int = _int("SCAN_INTERVAL_SEC", 60)
     tracker_interval_sec: int = _int("TRACKER_INTERVAL_SEC", 30)
 
+    # --- Concurrency & Timeouts ---
+    request_timeout_sec: float = _float("REQUEST_TIMEOUT_SEC", 30.0)
+    max_tracker_concurrency: int = _int("MAX_TRACKER_CONCURRENCY", 5)
+    notification_max_attempts: int = _int("NOTIFICATION_MAX_ATTEMPTS", 10)
+    rate_limit_delay_sec: float = _float("RATE_LIMIT_DELAY_SEC", 0.05)
+
     # --- Storage ---
     db_path: str = os.getenv("DB_PATH", "bot/data/trading.db")
     log_path: str = os.getenv("LOG_PATH", "bot/data/bot.log")
 
+    # --- Binance Square Add-on ---
+    square_enabled: bool = _bool("SQUARE_ENABLED", False)
+    square_dry_run: bool = _bool("SQUARE_DRY_RUN", True)
+    square_openapi_key: str = os.getenv("BINANCE_SQUARE_OPENAPI_KEY", "")
+    square_max_posts_per_day: int = _int("SQUARE_MAX_POSTS_PER_DAY", 50)
+    square_max_text_length: int = _int("SQUARE_MAX_TEXT_LENGTH", 600)
+    square_max_retries: int = _int("SQUARE_MAX_RETRIES", 3)
+    square_failure_threshold: int = _int("SQUARE_FAILURE_THRESHOLD", 5)
+
+
+
     enabled_patterns: tuple = field(default_factory=lambda: (
-        "Double Top", "Double Bottom", "Triple Top", "Triple Bottom",
-        "Head & Shoulders", "Inv Head & Shoulders",
-        "Bullish Flag", "Bearish Flag", "Bullish Pennant", "Bearish Pennant",
-        "Rising Wedge", "Falling Wedge",
-        "Ascending Triangle", "Descending Triangle", "Symmetrical Triangle",
-        "Rectangle", "Cup & Handle", "Inv Cup & Handle",
+        "Double Bottom", "Triple Bottom", "Inv Head & Shoulders",
+        "Bullish Flag", "Bullish Pennant", "Falling Wedge",
+        "Ascending Triangle", "Symmetrical Triangle", "Descending Channel",
+        "Rectangle", "Cup & Handle",
     ))
+
+    def __post_init__(self):
+        if self.min_rr <= 0:
+            raise ValueError("MIN_RR must be positive")
+        if self.candles_lookback < 220:
+            raise ValueError("CANDLES_LOOKBACK must be at least 220 for reliable 200 EMA and pivot calculation")
+        if self.tp1_r_multiple <= 0 or self.tp2_r_multiple <= self.tp1_r_multiple or self.tp3_r_multiple <= self.tp2_r_multiple:
+            raise ValueError("TP R-multiples must be strictly increasing: 0 < TP1 < TP2 < TP3")
+        if self.sl_pct_of_target_dist <= 0:
+            raise ValueError("SL_PCT_TARGET_DIST must be positive")
+        if self.scan_interval_sec <= 0 or self.tracker_interval_sec <= 0:
+            raise ValueError("Intervals must be positive")
+
 
 
 settings = Settings()
+

@@ -1,0 +1,139 @@
+================================================================================
+           PANDUAN PEMASANGAN NEOELLA TRADE BOT DI VPS ALIBABA CLOUD
+          (Signal Engine + Chart Generator + Telegram + Binance Square)
+================================================================================
+
+Panduan ini dibuat secara simpel dan terstruktur agar bot dapat langsung berjalan 
+24/7 di VPS Linux (Ubuntu / Debian).
+
+--------------------------------------------------------------------------------
+LANGKAH 1: PERSIAPAN VPS (UPDATE SYSTEM)
+--------------------------------------------------------------------------------
+Buka terminal SSH VPS Anda, lalu jalankan:
+
+  sudo apt update && sudo apt upgrade -y
+
+
+--------------------------------------------------------------------------------
+LANGKAH 2: INSTAL PYTHON & NODE.JS
+--------------------------------------------------------------------------------
+1. Instal Python & Tools pendukung:
+   sudo apt install -y python3 python3-pip python3-venv git screen curl
+
+2. Instal Node.js 20 LTS (Wajib untuk official Binance Square Image Post):
+   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+   sudo apt install -y nodejs
+
+3. Cek versi (Pastikan keduanya muncul):
+   python3 -V
+   node -v
+
+
+--------------------------------------------------------------------------------
+LANGKAH 3: UPLOAD / TRANSFER FOLDER BOT KE VPS
+--------------------------------------------------------------------------------
+Upload seluruh folder "ChartPattern_Bot" ke direktori home VPS Anda 
+(misalnya: /root/ChartPattern_Bot atau /home/ubuntu/ChartPattern_Bot).
+
+Masuk ke folder bot:
+  cd ~/ChartPattern_Bot
+
+
+--------------------------------------------------------------------------------
+LANGKAH 4: BUAT VIRTUAL ENVIRONMENT & INSTAL DEPENDENCY
+--------------------------------------------------------------------------------
+1. Buat virtual environment Python:
+   python3 -m venv venv
+
+2. Aktifkan virtual environment:
+   source venv/bin/activate
+
+3. Instal library Python yang dibutuhkan:
+   pip install -r requirements.txt
+
+
+--------------------------------------------------------------------------------
+LANGKAH 5: KONFIGURASI FILE .env
+--------------------------------------------------------------------------------
+Buka file .env:
+  nano .env
+
+Pastikan isinya sudah sesuai:
+
+  # --- Binance Futures ---
+  BINANCE_API_KEY=api_key_binance_anda
+  BINANCE_API_SECRET=api_secret_binance_anda
+  BINANCE_TESTNET=false
+
+  # --- Telegram ---
+  TELEGRAM_BOT_TOKEN=token_bot_telegram_anda
+  TELEGRAM_CHAT_ID=id_channel_atau_group_anda
+
+  # --- Database & Log ---
+  DB_PATH=bot/data/trading.db
+  LOG_PATH=bot/data/bot.log
+
+  # --- Binance Square Production ---
+  SQUARE_ENABLED=true
+  SQUARE_DRY_RUN=false
+  BINANCE_SQUARE_OPENAPI_KEY=openapi_key_binance_square_anda
+  SQUARE_MAX_POSTS_PER_DAY=50
+  SQUARE_MAX_TEXT_LENGTH=600
+  SQUARE_MAX_RETRIES=3
+  SQUARE_FAILURE_THRESHOLD=5
+
+Simpan file: Tekan CTRL + O, lalu ENTER.
+Keluar nano : Tekan CTRL + X.
+
+
+--------------------------------------------------------------------------------
+LANGKAH 6: CARA MENJALANKAN BOT 24/7 (BACKGROUND SERVICE)
+--------------------------------------------------------------------------------
+Gunakan systemd agar bot otomatis hidup kembali jika VPS restart/reboot.
+
+1. Buat file service:
+   sudo nano /etc/systemd/system/tradebot.service
+
+2. Paste teks berikut (sesuaikan /root/ChartPattern_Bot dengan path VPS Anda):
+
+   [Unit]
+   Description=NeoElla Trade Bot Binance Square & Telegram
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=root
+   WorkingDirectory=/root/ChartPattern_Bot
+   ExecStart=/root/ChartPattern_Bot/venv/bin/python main.py
+   Restart=always
+   RestartSec=5
+
+   [Install]
+   WantedBy=multi-user.target
+
+3. Simpan (CTRL+O, ENTER) dan Keluar (CTRL+X).
+
+4. Aktifkan & Jalankan service:
+   sudo systemctl daemon-reload
+   sudo systemctl enable tradebot
+   sudo systemctl start tradebot
+
+
+--------------------------------------------------------------------------------
+LANGKAH 7: PERINTAH PENTING UNTUK MEMANTAU BOT
+--------------------------------------------------------------------------------
+- Melihat status bot apakah sedang berjalan:
+  sudo systemctl status tradebot
+
+- Melihat log live output bot di terminal:
+  journalctl -u tradebot -f
+
+- Menghentikan bot:
+  sudo systemctl stop tradebot
+
+- Merestart bot:
+  sudo systemctl restart tradebot
+
+================================================================================
+               SELESAI — BOT ANDA SEKARANG SUDAH AKTIF 24/7!
+================================================================================

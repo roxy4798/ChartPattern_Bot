@@ -47,13 +47,36 @@ def find_pivots(df: pd.DataFrame, lb_left: int, lb_right: int) -> tuple[list[Piv
     return pivot_highs, pivot_lows
 
 
+def find_multiscale_pivots(
+    df: pd.DataFrame,
+    major_lb: int = 15,
+    medium_lb: int = 8,
+) -> dict[str, tuple[list[Pivot], list[Pivot]]]:
+    """Extract both major and medium swing pivots for multi-scale trendline fitting.
+    Returns dict with keys 'major' and 'medium', each containing (pivot_highs, pivot_lows)
+    ordered newest-first. Zero look-ahead bias.
+    """
+    major_ph, major_pl = find_pivots(df, major_lb, major_lb)
+    medium_ph, medium_pl = find_pivots(df, medium_lb, medium_lb)
+    return {
+        "major": (major_ph, major_pl),
+        "medium": (medium_ph, medium_pl),
+    }
+
+
 def project(x1: float, y1: float, x2: float, y2: float, target_x: float) -> float:
-    if x2 == x1:
-        return y1
-    return y1 + ((y2 - y1) / (x2 - x1)) * (target_x - x1)
+    if x2 == x1 or not np.isfinite(x1) or not np.isfinite(x2):
+        return float(y1)
+    return float(y1 + ((y2 - y1) / (x2 - x1)) * (target_x - x1))
 
 
 def is_near(v1: float, v2: float, tol_pct: float) -> bool:
-    if v1 is None or v2 is None or (v1 == 0 and v2 == 0):
+    if v1 is None or v2 is None:
         return False
-    return abs(v1 - v2) <= ((v1 + v2) / 2) * tol_pct
+    if not (np.isfinite(v1) and np.isfinite(v2)):
+        return False
+    denom = (abs(v1) + abs(v2)) / 2
+    if denom == 0:
+        return True
+    return abs(v1 - v2) <= denom * tol_pct
+

@@ -69,3 +69,5 @@ class Signal:
     telegram_message_id: Optional[int] = None
     telegram_chart_message_id: Optional[int] = None
     created_at: Optional[str] = None
+    scan_id: Optional[str] = None
+

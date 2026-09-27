@@ -2,3 +2,33 @@ modules = ["python-3.11"]
 [nix]
 channel = "stable-25_05"
 packages = ["cairo", "ffmpeg-full", "freetype", "ghostscript", "glibcLocales", "gobject-introspection", "gtk3", "pkg-config", "qhull", "tcl", "tk", "unzip"]
+
+[userenv]
+
+[userenv.shared]
+MAX_SYMBOLS = "2"
+SCAN_INTERVAL_SEC = "120"
+TRACKER_INTERVAL_SEC = "30"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "NeoElla Trade Bot"
+
+[[workflows.workflow]]
+name = "NeoElla Trade Bot"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python -m bot.main"
+
+[workflows.workflow.metadata]
+outputType = "console"

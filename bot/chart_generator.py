@@ -100,14 +100,18 @@ def render_signal_chart(symbol: str, timeframe: str, df: pd.DataFrame,
     entry/SL/TP lines. Returns PNG bytes."""
     _validate_inputs(symbol, timeframe, df, pattern, signal)
     df = df.reset_index(drop=True).copy()
-    plot_df = df.tail(lookback).copy()
+    
+    # Ensure entire long structural pattern from origin is fully visible
+    pattern_len = len(df) - max(0, pattern.start_idx)
+    actual_lookback = min(len(df), max(lookback, pattern_len + 20))
+    plot_df = df.tail(actual_lookback).copy()
     if plot_df.empty:
         raise ValueError("Cannot render chart; candle data is empty")
     plot_df.index = pd.DatetimeIndex(plot_df["open_time"])
     offset = len(df) - len(plot_df)
 
     ema200 = ema(df["close"], 200)
-    plot_df["EMA200"] = ema200.tail(lookback).values
+    plot_df["EMA200"] = ema200.tail(actual_lookback).values
 
     addplots = [mpf.make_addplot(plot_df["EMA200"], color="#f5c518", width=1.2)]
     confirmation = pd.Series(np.nan, index=plot_df.index, dtype=float)
@@ -128,92 +132,131 @@ def render_signal_chart(symbol: str, timeframe: str, df: pd.DataFrame,
                                     "axes.labelcolor": "#d1d4dc", "xtick.color": "#787b86",
                                     "ytick.color": "#787b86"})
 
+    levels = [
+        ("SL", signal.stop_loss, "#ff1744", "--"),
+        ("Entry", signal.entry_price, "#ffd600", "-"),
+        ("TP1", signal.tp1, "#00e676", "--"),
+        ("TP2", signal.tp2, "#00c853", "--"),
+        ("TP3", signal.tp3, "#00e5ff", "--"),
+    ]
+
     hlines = dict(
-        hlines=[signal.entry_price, signal.stop_loss, signal.tp1, signal.tp2, signal.tp3],
-        colors=["#ffd600", "#ff1744", "#00e676", "#00c853", "#00b0ff"],
-        linestyle="--", linewidths=1.0,
+        hlines=[lvl[1] for lvl in levels],
+        colors=[lvl[2] for lvl in levels],
+        linestyle=[lvl[3] for lvl in levels],
+        linewidths=1.2,
     )
 
     fig, axes = mpf.plot(
         plot_df, type="candle", style=style, addplot=addplots, hlines=hlines,
-        volume=False, returnfig=True, figsize=(11, 6.5), tight_layout=True,
+        volume=False, returnfig=True, figsize=(11.5, 6.8),
         datetime_format="%m-%d %H:%M", xrotation=15,
     )
-    ax = axes[0]
+    try:
+        ax = axes[0]
 
-    def _clamp(idx):
-        return max(0, min(len(plot_df) - 1, idx - offset))
+        # Calculate complete Y-limits ensuring candles, SL, and all TP1/TP2/TP3 levels are 100% visible
+        all_y = [
+            plot_df["low"].min(), plot_df["high"].max(),
+            signal.entry_price, signal.stop_loss,
+            signal.tp1, signal.tp2, signal.tp3,
+        ]
+        if pattern.upper_line:
+            all_y.extend([pattern.upper_line[1], pattern.upper_line[3]])
+        if pattern.lower_line:
+            all_y.extend([pattern.lower_line[1], pattern.lower_line[3]])
 
-    def _draw_line(line, color):
-        if not line:
-            return
-        x1, y1, x2, y2 = line
-        ax.plot([_clamp(x1), _clamp(x2)], [y1, y2], color=color, linewidth=2, alpha=0.9, zorder=5)
+        valid_y = [y for y in all_y if y is not None and np.isfinite(y)]
+        min_y, max_y = min(valid_y), max(valid_y)
+        y_span = max(max_y - min_y, 1e-12)
+        ax.set_ylim(min_y - y_span * 0.08, max_y + y_span * 0.08)
 
-    pat_color = "#00e676" if pattern.is_bullish else "#ff1744"
-    _draw_line(pattern.upper_line, pat_color)
-    _draw_line(pattern.lower_line, pat_color)
-    if pattern.upper_line and pattern.lower_line:
-        upper = pattern.upper_line
-        lower = pattern.lower_line
-        ax.fill_between(
-            [_clamp(upper[0]), _clamp(upper[2])],
-            [upper[1], upper[3]], [lower[1], lower[3]],
-            color=pat_color, alpha=0.06, zorder=1,
+        # Extend X-limits to the right to create an 8-bar projection zone for clear target badges
+        total_bars = len(plot_df)
+        ax.set_xlim(-1, total_bars + 9)
+
+        def _clamp(idx):
+            return max(0, min(total_bars - 1, idx - offset))
+
+        def _draw_line(line, color):
+            if not line:
+                return
+            x1, y1, x2, y2 = line
+            # Project structural trendline past breakout bar into the projection zone
+            px1 = max(0, min(total_bars - 1, x1 - offset))
+            proj_extend = 4 if x2 >= len(df) - 1 else 0
+            px2 = max(0, min(total_bars + 5, (x2 - offset) + proj_extend))
+            py2 = float(y1 + ((y2 - y1) / max(1, x2 - x1)) * ((px2 + offset) - x1)) if x2 != x1 else y2
+            ax.plot([px1, px2], [y1, py2], color=color, linewidth=2.2, alpha=0.9, zorder=5)
+
+        pat_color = "#00e676" if pattern.is_bullish else "#ff1744"
+        _draw_line(pattern.upper_line, pat_color)
+        _draw_line(pattern.lower_line, pat_color)
+        if pattern.upper_line and pattern.lower_line:
+            upper = pattern.upper_line
+            lower = pattern.lower_line
+            ax.fill_between(
+                [_clamp(upper[0]), _clamp(upper[2])],
+                [upper[1], upper[3]], [lower[1], lower[3]],
+                color=pat_color, alpha=0.06, zorder=1,
+            )
+
+        # Plot actual pivots in the detected structure
+        pivot_highs, pivot_lows = find_pivots(df, settings.lb_left, settings.lb_right)
+        structure_start = max(0, pattern.start_idx)
+        for pivot, marker, color in (
+            *((p, "^", "#ffb300") for p in pivot_highs
+              if structure_start <= p.index <= pattern.breakout_idx),
+            *((p, "v", "#29b6f6") for p in pivot_lows
+              if structure_start <= p.index <= pattern.breakout_idx),
+        ):
+            ax.scatter(_clamp(pivot.index), pivot.price, marker=marker, s=28,
+                       color=color, edgecolors="#131722", linewidths=0.5, zorder=6)
+
+        # Draw confirmation bubble
+        label_x = min(len(plot_df) - 1, _clamp(pattern.breakout_idx) + 2)
+        confirmation_label = describe_confirmation(df.iloc[-1], pattern.is_bullish)
+        label_y = (
+            max_y - y_span * 0.05 if pattern.is_bullish else min_y + y_span * 0.05
+        )
+        ax.annotate(
+            f"{pattern.name} · {signal.direction.value}\n"
+            f"CONFIRMATION CANDLE\n{confirmation_label}",
+            xy=(_clamp(pattern.breakout_idx), float(df["close"].iloc[-1])),
+            xytext=(label_x, label_y), color=pat_color, fontsize=8,
+            fontweight="bold", ha="right" if label_x >= len(plot_df) - 3 else "left",
+            va="top" if pattern.is_bullish else "bottom", clip_on=True,
+            bbox={"boxstyle": "round,pad=0.3", "facecolor": "#131722",
+                  "edgecolor": pat_color, "alpha": 0.9},
         )
 
-    # Plot actual pivots in the detected structure so the geometry can be
-    # checked against candles rather than relying on the pattern name.
-    pivot_highs, pivot_lows = find_pivots(df, settings.lb_left, settings.lb_right)
-    structure_start = max(0, pattern.start_idx)
-    for pivot, marker, color in (
-        *((p, "^", "#ffb300") for p in pivot_highs
-          if structure_start <= p.index <= pattern.breakout_idx),
-        *((p, "v", "#29b6f6") for p in pivot_lows
-          if structure_start <= p.index <= pattern.breakout_idx),
-    ):
-        ax.scatter(_clamp(pivot.index), pivot.price, marker=marker, s=28,
-                   color=color, edgecolors="#131722", linewidths=0.5, zorder=6)
+        # Extend horizontal level lines across the right projection zone and render clear price badges
+        badge_x = total_bars + 8
+        for name, price, color, ls in levels:
+            ax.hlines(price, xmin=total_bars - 1, xmax=badge_x, colors=color, linestyles=ls, linewidth=1.2, zorder=4)
+            ax.text(
+                badge_x, price, f" {name}: {price:.6g} ",
+                color="#131722" if name in ("SL", "TP1", "TP2", "TP3", "Entry") else color,
+                fontsize=8, fontweight="bold", va="center", ha="right",
+                bbox={"boxstyle": "round,pad=0.25", "facecolor": color, "edgecolor": "none", "alpha": 0.95},
+                zorder=7,
+            )
 
-    label_x = min(len(plot_df) - 1, _clamp(pattern.breakout_idx) + 2)
-    price_span = plot_df["high"].max() - plot_df["low"].min()
-    confirmation_label = describe_confirmation(df.iloc[-1], pattern.is_bullish)
-    label_y = (
-        plot_df["high"].max() - price_span * 0.06
-        if pattern.is_bullish else plot_df["low"].min() + price_span * 0.06
-    )
-    ax.annotate(
-        f"{pattern.name} · {signal.direction.value}\n"
-        f"CONFIRMATION CANDLE\n{confirmation_label}",
-        xy=(_clamp(pattern.breakout_idx), float(df["close"].iloc[-1])),
-        xytext=(label_x, label_y), color=pat_color, fontsize=8,
-        fontweight="bold", ha="right" if label_x >= len(plot_df) - 2 else "left",
-        va="top" if pattern.is_bullish else "bottom", clip_on=True,
-        bbox={"boxstyle": "round,pad=0.3", "facecolor": "#131722",
-              "edgecolor": pat_color, "alpha": 0.8},
-    )
+        title = f"  {symbol}  ·  {timeframe.upper()}  ·  {pattern.name}  ·  {signal.direction.value}  ·  EMA 200"
+        ax.set_title(title, color="#d1d4dc", fontsize=11, fontweight="bold", loc="left", pad=12)
 
-    for price, label, color in [
-        (signal.entry_price, f"Entry {signal.entry_price:.6g}", "#ffd600"),
-        (signal.stop_loss, f"SL {signal.stop_loss:.6g}", "#ff1744"),
-        (signal.tp1, f"TP1 {signal.tp1:.6g}", "#00e676"),
-        (signal.tp2, f"TP2 {signal.tp2:.6g}", "#00c853"),
-        (signal.tp3, f"TP3 {signal.tp3:.6g}", "#00b0ff"),
-    ]:
-        ax.annotate(label, xy=(len(plot_df) - 1, price), xytext=(-4, 0),
-                    textcoords="offset points", color=color, fontsize=8,
-                    va="center", ha="right", fontweight="bold", clip_on=True)
+        _add_watermark(fig, ax)
 
-    title = f"{symbol}  ·  {timeframe}  ·  {pattern.name}  ·  {signal.direction.value}  ·  EMA 200"
-    ax.set_title(title, color="#d1d4dc", fontsize=12, fontweight="bold", loc="left")
+        # Configure figure margins so title, axes, and right badges have ample breathing room
+        fig.subplots_adjust(top=0.92, bottom=0.10, left=0.07, right=0.95)
 
-    _add_watermark(fig, ax)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor(), bbox_inches=None)
+        buf.seek(0)
+        image = buf.read()
+        if not image.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError("Chart rendering produced an invalid PNG")
+        return image
+    finally:
+        plt.close(fig)
 
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
-    plt.close(fig)
-    buf.seek(0)
-    image = buf.read()
-    if not image.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise ValueError("Chart rendering produced an invalid PNG")
-    return image

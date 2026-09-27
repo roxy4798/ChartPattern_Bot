@@ -43,24 +43,33 @@ class Bucket:
 
 def _add(bucket: Bucket, s: Signal):
     bucket.signals += 1
+    pnl = float(s.pnl_pct) if s.pnl_pct is not None else None
+    
     if s.result == "WIN":
         bucket.wins += 1
-        bucket.win_pnls.append(s.pnl_pct or 0.0)
+        if pnl is not None:
+            bucket.win_pnls.append(pnl)
     elif s.result == "LOSS":
         bucket.losses += 1
-        bucket.loss_pnls.append(s.pnl_pct or 0.0)
-    if s.pnl_pct is not None:
-        bucket.total_pnl += s.pnl_pct
-    if s.status.value == "TP1_HIT":
+        if pnl is not None:
+            bucket.loss_pnls.append(pnl)
+            
+    if pnl is not None:
+        bucket.total_pnl += pnl
+
+    st = s.status.value if hasattr(s.status, "value") else str(s.status)
+    if st == "TP1_HIT":
         bucket.tp1 += 1
-    elif s.status.value == "TP2_HIT":
+    elif st == "TP2_HIT":
         bucket.tp2 += 1
-    elif s.status.value in ("TP3_HIT", "CLOSED") and s.result == "WIN":
+    elif st in ("TP3_HIT", "CLOSED") and s.result == "WIN":
         bucket.tp3 += 1
-    elif s.status.value == "SL_HIT":
+    elif st == "SL_HIT":
         bucket.sl += 1
-    if s.duration_sec:
-        bucket.durations.append(s.duration_sec)
+        
+    if s.duration_sec is not None:
+        bucket.durations.append(int(s.duration_sec))
+
 
 
 @dataclass

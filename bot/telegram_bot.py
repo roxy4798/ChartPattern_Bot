@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import io
 import logging
 from html import escape
@@ -85,7 +86,7 @@ def build_signal_message(s: Signal, reason: str, dist_to_ema_pct: float) -> str:
         f"• TP3: {_fmt_price(s.tp3)}\n"
         f"• R:R (to TP2): {rr:.2f}\n\n"
         f"<b>SIGNAL REASON</b>\n{reason}\n\n"
-        f"<i>ID: {s.id[:8]}</i>"
+        f"<i>ID: {s.id[:8]} · Time: {_fmt_signal_time(s.signal_time)}</i>"
     )
 
 
@@ -126,53 +127,113 @@ def build_closed_message(s: Signal, result: str) -> str:
         f"Result: <b>{result}</b>\n"
         f"PnL: <b>{(s.pnl_pct or 0):+.2f}%</b>\n"
         f"Duration: {duration}\n\n"
-        f"Pattern: {s.pattern}"
+        f"Pattern: {_safe(s.pattern)}"
     )
 
 
 class Notifier:
     def __init__(self, app: Application, chat_id: str):
         self.app = app
-        self.chat_id = chat_id
+        self.chat_id = str(chat_id).strip() if chat_id else ""
 
     async def send_signal(self, s: Signal, reason: str, chart_png: bytes) -> tuple[int, int]:
+        if not self.chat_id:
+            raise ValueError("TELEGRAM_CHAT_ID is not configured in .env")
         dist = (s.price_at_signal - s.ema200_at_signal) / s.ema200_at_signal * 100
         text = build_signal_message(s, reason, dist)
-        photo_msg = await self.app.bot.send_photo(
-            chat_id=self.chat_id, photo=InputFile(io.BytesIO(chart_png), filename=f"{s.symbol}_{s.timeframe}.png"),
-        )
-        text_msg = await self.app.bot.send_message(
-            chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML,
-        )
-        return text_msg.message_id, photo_msg.message_id
+        
+        # Telegram photo caption supports up to 1024 characters
+        if len(text) <= 1024:
+            photo_msg = await self.app.bot.send_photo(
+                chat_id=self.chat_id,
+                photo=InputFile(io.BytesIO(chart_png), filename=f"{s.symbol}_{s.timeframe}.png"),
+                caption=text,
+                parse_mode=ParseMode.HTML,
+            )
+            return photo_msg.message_id, photo_msg.message_id
+        else:
+            # Fallback if text is unusually long
+            photo_msg = await self.app.bot.send_photo(
+                chat_id=self.chat_id,
+                photo=InputFile(io.BytesIO(chart_png), filename=f"{s.symbol}_{s.timeframe}.png"),
+            )
+            text_msg = await self.app.bot.send_message(
+                chat_id=self.chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_to_message_id=photo_msg.message_id,
+            )
+            return text_msg.message_id, photo_msg.message_id
 
     async def send_update(self, s: Signal, event: str, price: float):
+        if not self.chat_id:
+            return
         text = build_update_message(s, event, price)
-        await self.app.bot.send_message(chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML)
+        reply_id = s.telegram_message_id or s.telegram_chart_message_id
+        try:
+            await self.app.bot.send_message(
+                chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML,
+                reply_to_message_id=reply_id,
+            )
+        except Exception:
+            # Fallback if reply_to_message_id no longer exists
+            await self.app.bot.send_message(chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML)
 
     async def send_closed(self, s: Signal, result: str):
+        if not self.chat_id:
+            return
         text = build_closed_message(s, result)
-        await self.app.bot.send_message(chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML)
+        reply_id = s.telegram_message_id or s.telegram_chart_message_id
+        try:
+            await self.app.bot.send_message(
+                chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML,
+                reply_to_message_id=reply_id,
+            )
+        except Exception:
+            await self.app.bot.send_message(chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML)
 
     async def flush_notifications(self, db: Database):
-        """Deliver persisted state events in order; failures remain retryable."""
-        for item in await db.get_pending_notifications():
+        """Deliver persisted state events in order; resilient with rate limiting and retry."""
+        if not self.chat_id:
+            return
+        pending = await db.get_pending_notifications(limit=50, max_attempts=settings.notification_max_attempts)
+        for item in pending:
             try:
                 signal = await db.get_signal(item["signal_id"])
                 if signal is None:
-                    raise ValueError(f"Signal {item['signal_id']} no longer exists")
+                    await db.mark_notification_delivered(item["id"])
+                    continue
+
                 payload = item["payload"]
                 if item["kind"] == "update":
-                    await self.send_update(signal, payload["event"], payload["price"])
+                    await self.send_update(signal, payload["event"], float(payload["price"]))
                 elif item["kind"] == "closed":
                     await self.send_closed(signal, payload["result"])
+                elif item["kind"] == "signal_text":
+                    # Only send fallback text if telegram_message_id was not set by visual send
+                    if not signal.telegram_message_id:
+                        dist = (signal.price_at_signal - signal.ema200_at_signal) / signal.ema200_at_signal * 100
+                        text = build_signal_message(signal, payload.get("reason", ""), dist)
+                        await self.app.bot.send_message(chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML)
                 else:
-                    raise ValueError(f"Unknown notification kind: {item['kind']}")
+                    log.warning("Unknown notification kind: %s", item["kind"])
+
                 await db.mark_notification_delivered(item["id"])
+                await asyncio.sleep(settings.rate_limit_delay_sec)
             except Exception as exc:
                 await db.mark_notification_failed(item["id"], repr(exc))
-                log.exception("Notification delivery failed for outbox item %s", item["id"])
-                break
+                error_msg = str(exc)
+                if "Chat not found" in error_msg:
+                    log.warning(
+                        "Telegram chat '%s' not found. Please verify TELEGRAM_CHAT_ID in .env and start the bot with /start in Telegram.",
+                        self.chat_id,
+                    )
+                else:
+                    log.exception("Notification delivery failed for outbox item %s (attempt %d)",
+                                  item["id"], item.get("attempts", 0) + 1)
+                await asyncio.sleep(0.5)
+
+
 
 
 def _bucket_line(name: str, b: Bucket) -> str:
@@ -235,15 +296,15 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Signal monitoring</b>\n"
         "• /active — open signals with live targets and status\n"
         "• /history — latest signals and outcomes\n"
-        "• /status — bot and tracking status\n\n"
+        "• /status — bot operational status and heartbeats\n"
+        "• /health — diagnostic health and outbox status\n\n"
         "<b>Analytics</b>\n"
         "• /stats — concise performance summary\n"
         "• /performance — full pattern, timeframe, and target report\n\n"
         "<b>General</b>\n"
         "• /start — welcome message and quick guide\n"
         "• /help — show this command guide\n\n"
-        "<i>Signals use closed-candle pattern detection and EMA 200 trend alignment. "
-        "All prices shown are sourced from the persisted signal state.</i>"
+        "<i>All prices and status updates derive from verified closed-candle single-source-of-truth state.</i>"
     )
 
 
@@ -251,15 +312,46 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db: Database = context.application.bot_data["db"]
     active = await db.get_active_signals()
     recent = await db.get_recent_signals(limit=1)
+    meta = await db.get_all_metadata()
+
+    now = datetime.now(timezone.utc)
+    
+    last_scan_raw = meta.get("last_scan_at", {}).get("value")
+    last_tracker_raw = meta.get("last_tracker_at", {}).get("value")
+    scan_count = meta.get("scan_symbols_count", {}).get("value", "0")
+    
+    scan_age = _age_label(last_scan_raw)
+    tracker_age = _age_label(last_tracker_raw)
+    
+    scan_status = "🟢 Active" if last_scan_raw else "⚪ Initializing"
+    tracker_status = "🟢 Active" if last_tracker_raw else "⚪ Initializing"
+
     lines = [
         "🟢 <b>NEOELLA TRADE · SYSTEM STATUS</b>\n",
-        "<b>Scanner:</b> Online",
-        "<b>Tracker:</b> Online",
-        "<b>Signal storage:</b> SQLite active",
+        f"<b>Scanner:</b> {scan_status} (Last: {scan_age} ago, {scan_count} symbols)",
+        f"<b>Tracker:</b> {tracker_status} (Last: {tracker_age} ago)",
+        "<b>Storage:</b> SQLite WAL mode (persistent)",
         f"<b>Open signals:</b> {len(active)}",
         f"<b>Last signal:</b> {_fmt_signal_time(recent[0].signal_time) if recent else 'No signals yet'}",
-        "\n<i>Telegram status messages reflect the last persisted state available to the bot.</i>",
+        "\n<i>All status information reflects live persisted system heartbeat metadata.</i>",
     ]
+    await update.message.reply_html("\n".join(lines))
+
+
+async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db: Database = context.application.bot_data["db"]
+    pending = await db.get_pending_notifications(limit=100)
+    meta = await db.get_all_metadata()
+    
+    lines = [
+        "🩺 <b>NEOELLA TRADE · DIAGNOSTIC HEALTH</b>\n",
+        "<b>Database:</b> Connected (WAL mode)",
+        f"<b>Pending Outbox Notifications:</b> {len(pending)}",
+        f"<b>Last Scanner Heartbeat:</b> {meta.get('last_scan_at', {}).get('value', 'None')}",
+        f"<b>Last Tracker Heartbeat:</b> {meta.get('last_tracker_at', {}).get('value', 'None')}",
+    ]
+    if pending:
+        lines.append(f"\n⚠️ <b>Outbox Warning:</b> {len(pending)} items awaiting delivery.")
     await update.message.reply_html("\n".join(lines))
 
 
@@ -318,8 +410,10 @@ def build_application(db: Database) -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("performance", cmd_performance))
     app.add_handler(CommandHandler("active", cmd_active))
     app.add_handler(CommandHandler("history", cmd_history))
     return app
+
