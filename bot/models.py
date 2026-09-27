@@ -53,9 +53,9 @@ class Signal:
     tp1: float
     tp2: float
     tp3: float
-    ema200_at_signal: float
     price_at_signal: float
     signal_time: str  # ISO8601 UTC
+    ema200_at_signal: Optional[float] = None
     status: SignalStatus = SignalStatus.ACTIVE
     tp1_hit_time: Optional[str] = None
     tp2_hit_time: Optional[str] = None

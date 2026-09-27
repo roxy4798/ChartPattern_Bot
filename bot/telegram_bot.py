@@ -58,9 +58,8 @@ def _direction_icon(direction: str) -> str:
     return DIR_EMOJI.get(direction, "⚪")
 
 
-def build_signal_message(s: Signal, reason: str, dist_to_ema_pct: float) -> str:
+def build_signal_message(s: Signal, reason: str, dist_to_ema_pct: Optional[float] = None) -> str:
     side = _direction_icon(s.direction.value)
-    pos = "above" if s.price_at_signal > s.ema200_at_signal else "below"
     rr = abs(s.tp2 - s.entry_price) / abs(s.entry_price - s.stop_loss) if s.entry_price != s.stop_loss else 0
     return (
         f"{side} <b>{s.direction.value} SIGNAL</b>\n"
@@ -72,11 +71,6 @@ def build_signal_message(s: Signal, reason: str, dist_to_ema_pct: float) -> str:
         f"• Status: Confirmed (closed-candle breakout)\n"
         f"• Breakout level: {_fmt_price(s.entry_price)}\n"
         f"• Confirmation: Closed candle\n\n"
-        f"<b>EMA 200 FILTER</b>\n"
-        f"• Price at signal: {_fmt_price(s.price_at_signal)}\n"
-        f"• EMA200: {_fmt_price(s.ema200_at_signal)}\n"
-        f"• Position: Price {pos} EMA200\n"
-        f"• Distance: {dist_to_ema_pct:+.2f}%\n\n"
         f"<b>ENTRY</b>\n"
         f"• Entry: {_fmt_price(s.entry_price)}\n\n"
         f"<b>RISK MANAGEMENT</b>\n"
@@ -139,8 +133,7 @@ class Notifier:
     async def send_signal(self, s: Signal, reason: str, chart_png: bytes) -> tuple[int, int]:
         if not self.chat_id:
             raise ValueError("TELEGRAM_CHAT_ID is not configured in .env")
-        dist = (s.price_at_signal - s.ema200_at_signal) / s.ema200_at_signal * 100
-        text = build_signal_message(s, reason, dist)
+        text = build_signal_message(s, reason)
         
         # Telegram photo caption supports up to 1024 characters
         if len(text) <= 1024:
@@ -212,8 +205,7 @@ class Notifier:
                 elif item["kind"] == "signal_text":
                     # Only send fallback text if telegram_message_id was not set by visual send
                     if not signal.telegram_message_id:
-                        dist = (signal.price_at_signal - signal.ema200_at_signal) / signal.ema200_at_signal * 100
-                        text = build_signal_message(signal, payload.get("reason", ""), dist)
+                        text = build_signal_message(signal, payload.get("reason", ""))
                         await self.app.bot.send_message(chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML)
                 else:
                     log.warning("Unknown notification kind: %s", item["kind"])

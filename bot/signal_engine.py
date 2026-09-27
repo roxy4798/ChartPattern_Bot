@@ -6,7 +6,7 @@ import pandas as pd
 from typing import Optional
 
 from bot.config import settings
-from bot.indicators import ema, atr, find_pivots, find_structural_pivots
+from bot.indicators import atr, find_pivots, find_structural_pivots
 from bot.patterns import detect_all
 from bot.models import Signal, Direction, SignalStatus, PatternResult
 from bot.chart_generator import describe_confirmation
@@ -17,7 +17,7 @@ log = logging.getLogger("signal_engine")
 def _validate_signal(signal: Signal, pattern: PatternResult) -> None:
     prices = (
         signal.entry_price, signal.stop_loss, signal.tp1, signal.tp2, signal.tp3,
-        signal.ema200_at_signal, signal.price_at_signal
+        signal.price_at_signal
     )
     if not all(np.isfinite(p) and p > 0 for p in prices):
         raise ValueError(f"Signal for {signal.symbol} {signal.timeframe} contains non-positive or non-finite prices")
@@ -41,7 +41,7 @@ def _validate_signal(signal: Signal, pattern: PatternResult) -> None:
         raise ValueError(f"Signal direction {signal.direction} does not match pattern bias {expected_dir}")
 
 
-def _reason(pattern: PatternResult, ema200: float, price: float, candle: pd.Series) -> str:
+def _reason(pattern: PatternResult, price: float, candle: pd.Series) -> str:
     confirmation = describe_confirmation(candle, pattern.is_bullish)
     return (f"Bullish {pattern.name} confirmed by a closed-candle structural breakout "
             f"at {price:.6g}. "
@@ -61,7 +61,6 @@ def evaluate_symbol_timeframe(
         return None, None, None
 
     df = df.reset_index(drop=True).copy()
-    ema200 = ema(df["close"], settings.ema_period)
     atr_series = atr(df, settings.atr_period)
     pivot_highs, pivot_lows = find_structural_pivots(
         df,
@@ -78,9 +77,7 @@ def evaluate_symbol_timeframe(
         return None, None, None
 
     last_close = float(df["close"].iloc[-1])
-    ema_last = float(ema200.iloc[-1]) if (len(ema200) > 0 and np.isfinite(ema200.iloc[-1])) else last_close
 
-    # EMA200 FILTER: DISABLED / NOT USED as entry filter per strategy rule.
     direction = Direction.LONG
     entry = pattern.entry_price
     stop = pattern.stop_price
@@ -118,13 +115,12 @@ def evaluate_symbol_timeframe(
         entry_price=entry,
         stop_loss=stop,
         tp1=tp1, tp2=tp2, tp3=tp3,
-        ema200_at_signal=ema_last,
         price_at_signal=last_close,
         signal_time=candle_close_time,
         status=SignalStatus.ACTIVE,
         scan_id=scan_id,
     )
     _validate_signal(signal, pattern)
-    reason = _reason(pattern, ema_last, last_close, breakout_candle)
+    reason = _reason(pattern, last_close, breakout_candle)
     return signal, pattern, reason
 

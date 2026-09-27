@@ -5,7 +5,7 @@ import numpy as np
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 from bot.models import PatternResult, Signal
-from bot.indicators import ema, find_pivots
+from bot.indicators import find_pivots
 from bot.config import settings
 
 WATERMARK_TEXT = "NeoElla Trade"
@@ -84,8 +84,7 @@ def _validate_inputs(symbol: str, timeframe: str, df: pd.DataFrame,
         raise ValueError("Cannot render chart; OHLC data is invalid")
     if pattern.breakout_idx < 0 or pattern.breakout_idx >= len(df):
         raise ValueError("Cannot render chart; breakout candle is outside the data")
-    prices = (signal.entry_price, signal.stop_loss, signal.tp1, signal.tp2, signal.tp3,
-              signal.ema200_at_signal)
+    prices = (signal.entry_price, signal.stop_loss, signal.tp1, signal.tp2, signal.tp3)
     if not all(np.isfinite(price) for price in prices):
         raise ValueError("Cannot render chart; signal contains a non-finite price")
     for line_name in ("upper_line", "lower_line"):
@@ -96,8 +95,7 @@ def _validate_inputs(symbol: str, timeframe: str, df: pd.DataFrame,
 
 def render_signal_chart(symbol: str, timeframe: str, df: pd.DataFrame,
                          pattern: PatternResult, signal: Signal, lookback: int = 150) -> bytes:
-    """Renders a candlestick chart with EMA200, pattern geometry, and
-    entry/SL/TP lines. Returns PNG bytes."""
+    """Renders a candlestick chart with pattern geometry and entry/SL/TP lines. Returns PNG bytes."""
     _validate_inputs(symbol, timeframe, df, pattern, signal)
     df = df.reset_index(drop=True).copy()
     
@@ -110,10 +108,7 @@ def render_signal_chart(symbol: str, timeframe: str, df: pd.DataFrame,
     plot_df.index = pd.DatetimeIndex(plot_df["open_time"])
     offset = len(df) - len(plot_df)
 
-    ema200 = ema(df["close"], 200)
-    plot_df["EMA200"] = ema200.tail(actual_lookback).values
-
-    addplots = [mpf.make_addplot(plot_df["EMA200"], color="#f5c518", width=1.2)]
+    addplots = []
     confirmation = pd.Series(np.nan, index=plot_df.index, dtype=float)
     confirmation.iloc[-1] = (
         plot_df["high"].iloc[-1] if pattern.is_bullish else plot_df["low"].iloc[-1]
@@ -242,7 +237,7 @@ def render_signal_chart(symbol: str, timeframe: str, df: pd.DataFrame,
                 zorder=7,
             )
 
-        title = f"  {symbol}  ·  {timeframe.upper()}  ·  {pattern.name}  ·  {signal.direction.value}  ·  EMA 200"
+        title = f"  {symbol}  ·  {timeframe.upper()}  ·  {pattern.name}  ·  {signal.direction.value}"
         ax.set_title(title, color="#d1d4dc", fontsize=11, fontweight="bold", loc="left", pad=12)
 
         _add_watermark(fig, ax)

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Deterministic formatter for Binance Square posts.
 Strictly formats signal data without modifying numbers or making exaggerated claims.
 Enforces the SQUARE_MAX_TEXT_LENGTH safety limit (default 600 chars).
@@ -27,14 +27,12 @@ def format_square_post(signal: Signal, pattern: PatternResult) -> str:
     cashtag = extract_cashtag(signal.symbol)
     side = signal.direction.value
     icon = "🟢" if side == "LONG" else "🔴"
-    pos = "above" if signal.price_at_signal >= signal.ema200_at_signal else "below"
     rr = abs(signal.tp2 - signal.entry_price) / abs(signal.entry_price - signal.stop_loss) if signal.entry_price != signal.stop_loss else 0.0
 
     post = (
         f"🚨 {signal.symbol} {side} SIGNAL\n\n"
         f"{cashtag} | {signal.timeframe.upper()}\n"
-        f"📊 Pattern: {pattern.name}\n"
-        f"📈 Trend: Price {pos} EMA 200\n\n"
+        f"📊 Pattern: {pattern.name}\n\n"
         f"🎯 Entry: {_fmt_price(signal.entry_price)}\n"
         f"🛑 SL: {_fmt_price(signal.stop_loss)}\n"
         f"✅ TP1: {_fmt_price(signal.tp1)}\n"
