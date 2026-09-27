@@ -44,8 +44,8 @@ _shutdown = asyncio.Event()
 
 async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, square_publisher: Optional[SquarePublisher] = None):
 
-    log.info("Scanner engine online (Interval: %ds)", settings.scan_interval_sec)
-    sem = asyncio.Semaphore(8)
+    log.info("Scanner engine online (Interval: %ds, Concurrency: %d)", settings.scan_interval_sec, settings.scanner_concurrency)
+    sem = asyncio.Semaphore(settings.scanner_concurrency)
 
     while not _shutdown.is_set():
         scan_id = str(uuid.uuid4())[:8]

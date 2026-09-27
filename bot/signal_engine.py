@@ -6,7 +6,7 @@ import pandas as pd
 from typing import Optional
 
 from bot.config import settings
-from bot.indicators import ema, atr, find_pivots
+from bot.indicators import ema, atr, find_pivots, find_structural_pivots
 from bot.patterns import detect_all
 from bot.models import Signal, Direction, SignalStatus, PatternResult
 from bot.chart_generator import describe_confirmation
@@ -56,14 +56,18 @@ def evaluate_symbol_timeframe(
 ) -> tuple[Signal | None, PatternResult | None, str | None]:
     """Runs the full pipeline for one symbol/timeframe on already-closed
     candles. LONG ONLY. Returns (Signal or None, PatternResult or None, reason_text)."""
-    min_required_bars = max(settings.lb_left + settings.lb_right + 30, 60)
+    min_required_bars = max(settings.structural_fractal_period + 30, 100)
     if df is None or len(df) < min_required_bars:
         return None, None, None
 
     df = df.reset_index(drop=True).copy()
     ema200 = ema(df["close"], settings.ema_period)
     atr_series = atr(df, settings.atr_period)
-    pivot_highs, pivot_lows = find_pivots(df, settings.lb_left, settings.lb_right)
+    pivot_highs, pivot_lows = find_structural_pivots(
+        df,
+        fractal_period=settings.structural_fractal_period,
+        min_pivot_dist=settings.trendline_min_pivot_dist,
+    )
 
     if len(pivot_highs) < 2 or len(pivot_lows) < 2:
         return None, None, None

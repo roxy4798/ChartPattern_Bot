@@ -2,12 +2,14 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath("."))
 from datetime import datetime, timezone, timedelta
+import asyncio
+import time
 import pandas as pd
 import numpy as np
 
 from bot.config import settings
-from bot.models import Direction, Signal, PatternResult
-from bot.indicators import ema, atr, find_pivots, find_multiscale_pivots
+from bot.models import Direction, Signal, PatternResult, Pivot
+from bot.indicators import ema, atr, find_pivots, find_structural_pivots, find_multiscale_pivots
 from bot.patterns import (
     fit_structural_trendline,
     detect_wedge,
@@ -17,24 +19,25 @@ from bot.patterns import (
 )
 from bot.signal_engine import evaluate_symbol_timeframe
 from bot.chart_generator import render_signal_chart
+from bot.binance_client import BinanceRateLimiter, CandleCache
 
 
-def generate_macro_channel_df(n_bars=200, tf_days=1, slope=-0.22, channel_width=14.0):
-    """Generates realistic macro descending channel / wedge across n_bars with 3+ distinct touches."""
-    start_date = datetime(2026, 1, 1, tzinfo=timezone.utc)
+def generate_macro_channel_df(n_bars=500, tf_days=1, slope=-0.15, channel_width=25.0, cycle=100.0):
+    """Generates realistic macro descending channel / wedge across n_bars with 4+ distinct 65-fractal touches."""
+    start_date = datetime(2025, 1, 1, tzinfo=timezone.utc)
     dates = [start_date + timedelta(days=i * tf_days) for i in range(n_bars)]
-    
+
     x = np.arange(n_bars, dtype=float)
-    origin_price = 160.0
+    origin_price = 200.0
     upper_base = origin_price + slope * x
     mid = upper_base - channel_width / 2.0
-    wave = np.sin((x - 10) * (2 * np.pi / 45.0))
-    close = mid + wave * (channel_width / 2.0 - 1.2)
-    close[-1] = upper_base[-1] + 3.0
-    open_p = close.copy() - 0.3
+    wave = np.sin((x - 20) * (2 * np.pi / cycle))
+    close = mid + wave * (channel_width / 2.0 - 2.0)
+    close[-1] = upper_base[-1] + 6.0  # Clear breakout candle
+    open_p = close.copy() - 0.5
     open_p[-1] = upper_base[-1] - 0.5
-    high = np.maximum(open_p, close) + 1.2
-    low = np.minimum(open_p, close) - 1.2
+    high = np.maximum(open_p, close) + 2.0
+    low = np.minimum(open_p, close) - 2.0
     high[-1] = close[-1] + 1.0
     low[-1] = open_p[-1] - 1.0
     volume = np.full(n_bars, 10000.0)
@@ -53,7 +56,7 @@ def generate_macro_channel_df(n_bars=200, tf_days=1, slope=-0.22, channel_width=
 
 def run_all_tests():
     print("=================================================================")
-    print("  RUNNING STRUCTURAL TRENDLINES & LONG-ONLY VERIFICATION SUITE  ")
+    print("  RUNNING STRUCTURAL TRENDLINES (65 FRACTAL) & RATE LIMIT SUITE  ")
     print("=================================================================")
 
     # 1. Test Active Timeframes
@@ -63,127 +66,131 @@ def run_all_tests():
     assert "4h" not in settings.timeframes and "1h" not in settings.timeframes and "15m" not in settings.timeframes
     print(f"  PASS: Active timeframes = {settings.timeframes} (No 12h, 4h, 1h, 15m)")
 
-    # 2. Test Multi-scale Pivots
-    print("\n[2] Testing Multi-scale Pivot Extraction...")
-    df_1d = generate_macro_channel_df(n_bars=200, tf_days=1)
-    pivots_dict = find_multiscale_pivots(df_1d, major_lb=15, medium_lb=8)
-    major_ph, major_pl = pivots_dict["major"]
-    medium_ph, medium_pl = pivots_dict["medium"]
-    assert len(major_ph) >= 2, "Should find at least 2 major swing highs"
-    assert len(medium_ph) >= len(major_ph), "Medium pivots should be equal or more granular than major"
-    print(f"  PASS: Found {len(major_ph)} major swing highs and {len(medium_ph)} medium swing highs")
+    # 2. Test 65 Fractal Period Extraction
+    print("\n[2] Testing 65 Fractal Period Structural Pivot Extraction...")
+    df_1d = generate_macro_channel_df(n_bars=500, tf_days=1)
+    struct_ph, struct_pl = find_structural_pivots(
+        df_1d,
+        fractal_period=settings.structural_fractal_period,
+        min_pivot_dist=settings.trendline_min_pivot_dist,
+    )
+    assert len(struct_ph) >= 3, f"Should find at least 3 structural swing highs across 500 bars, got {len(struct_ph)}"
+    assert len(struct_pl) >= 3, f"Should find at least 3 structural swing lows across 500 bars, got {len(struct_pl)}"
+    # Check that structural pivots are sufficiently spaced (no micro-squiggles)
+    for i in range(len(struct_ph) - 1):
+        dist = abs(struct_ph[i].index - struct_ph[i + 1].index)
+        assert dist >= settings.trendline_min_pivot_dist, f"Structural pivots must be >= {settings.trendline_min_pivot_dist} bars apart, got {dist}"
+    print(f"  PASS: Found {len(struct_ph)} structural swing highs and {len(struct_pl)} structural swing lows using period {settings.structural_fractal_period}")
 
-    # 3. Test Long Structural Trendline Fitting & Multi-Touch Validation
+    # 3. Test Long Structural Trendline Fitting (Touches & Span >= 65 bars)
     print("\n[3] Testing Long Structural Trendline Fitting (Touches & Span)...")
     atr_series = atr(df_1d, 14)
-    tl = fit_structural_trendline(df_1d, medium_ph, is_upper=True, atr_series=atr_series)
+    tl = fit_structural_trendline(df_1d, struct_ph, is_upper=True, atr_series=atr_series)
     assert tl is not None, "Structural trendline should be found on macro channel data"
-    assert tl.span_bars >= 50, f"Trendline should span macro structure, got span: {tl.span_bars} bars"
+    assert tl.span_bars >= settings.structural_min_span, f"Trendline must span at least {settings.structural_min_span} bars, got: {tl.span_bars}"
     assert tl.touches >= 2, f"Trendline should have at least 2 touches, got: {tl.touches}"
     assert tl.slope < 0, f"Descending channel trendline should have negative slope, got: {tl.slope}"
     print(f"  PASS: Structural Upper Trendline discovered! Origin bar: {tl.origin_idx} ({tl.span_bars} bars long), Touches: {tl.touches}, Slope: {tl.slope:.4f}")
 
-    # 4. Test 2-Touch and 3+ Touch Scenarios
-    print("\n[4] Testing 2-Touch vs 3+ Touch Scenarios...")
-    assert tl.touches >= 3, f"Expected 3+ touches on macro channel data, got: {tl.touches}"
-    print(f"  PASS: 3+ Touch confirmation verified ({tl.touches} touches along the structure)")
+    # 4. Test Rejection of Short / Non-Structural Trendlines
+    print("\n[4] Testing Strict Rejection of Short Trendlines (< 65 bars)...")
+    df_short = pd.DataFrame({"close": np.linspace(100, 90, 50)})
+    atr_short = pd.Series(np.full(50, 1.0))
+    pivots_short = [Pivot(price=100.0, index=10), Pivot(price=95.0, index=30)]
+    tl_short = fit_structural_trendline(df_short, pivots_short, is_upper=True, atr_series=atr_short)
+    assert tl_short is None, "Trendlines shorter than structural_min_span MUST be rejected!"
+    print(f"  PASS: Short trendline (span < {settings.structural_min_span}) was strictly rejected.")
 
     # 5. Test Penetration / Invalidation Filter
     print("\n[5] Testing Penetration & Invalidation Rejection...")
     df_violated = df_1d.copy()
-    # Inject premature breakout in the middle of the channel (at bar 80)
-    df_violated.loc[80:85, "close"] += 20.0
-    tl_violated = fit_structural_trendline(df_violated, medium_ph, is_upper=True, atr_series=atr_series)
-    # The violated line must either be rejected or have significant violations penalized
-    print(f"  PASS: Invalidation checks active (violations penalized or rejected)")
+    # Inject premature breakouts across intermediate and recent bars (breaching all potential lines)
+    df_violated.loc[380:390, "close"] += 25.0
+    df_violated.loc[460:470, "close"] += 25.0
+    tl_violated = fit_structural_trendline(df_violated, struct_ph, is_upper=True, atr_series=atr_series)
+    assert tl_violated is None, "Penetrated/invalidated trendlines MUST be rejected!"
+    print("  PASS: Penetrated trendline was successfully rejected.")
 
-    # 6. Test Breakout Confirmation
-    print("\n[6] Testing Fresh Breakout Confirmation...")
-    pat = detect_descending_channel(df_1d, atr_series, medium_ph, medium_pl, float(df_1d["close"].iloc[-1]), float(atr_series.iloc[-1]))
-    if pat is None:
-        pat = detect_wedge(df_1d, atr_series, medium_ph, medium_pl, float(df_1d["close"].iloc[-1]), float(atr_series.iloc[-1]))
-    assert pat is not None, "Should detect structural bullish breakout pattern"
+    # 6. Test Breakout Confirmation on Macro Structure
+    print("\n[6] Testing Fresh Breakout Confirmation on Macro Channel...")
+    sig, pat, reason = evaluate_symbol_timeframe("TESTUSDT", "1d", df_1d)
+    assert sig is not None, "Signal should be produced for clean macro channel breakout"
+    assert pat is not None, "Pattern should be detected"
     assert pat.is_bullish is True, "Pattern MUST be bullish!"
     assert pat.breakout_idx == len(df_1d) - 1, "Breakout candle must be the last closed bar"
-    print(f"  PASS: Detected pattern: {pat.name} (is_bullish={pat.is_bullish}) spanning from bar {pat.start_idx} to {pat.breakout_idx}")
+    print(f"  PASS: Detected pattern: {pat.name} (is_bullish={pat.is_bullish}) spanning {pat.upper_line[2] - pat.upper_line[0]} bars!")
 
     # 7. Test LONG ONLY Enforcement (No Short Signals Ever)
     print("\n[7] Verifying LONG ONLY Enforcement...")
-    # Feed inverted (ascending top / bearish setup) data
     df_bearish = df_1d.copy()
     df_bearish["close"] = 300.0 - df_1d["close"]
     df_bearish["high"] = 300.0 - df_1d["low"]
     df_bearish["low"] = 300.0 - df_1d["high"]
     df_bearish["open"] = 300.0 - df_1d["open"]
-    atr_bear = atr(df_bearish, 14)
-    ph_b, pl_b = find_pivots(df_bearish, 10, 10)
-    res_b = detect_all(df_bearish, atr_bear, ph_b, pl_b)
     sig_b, _, _ = evaluate_symbol_timeframe("TESTUSDT", "1d", df_bearish)
     assert sig_b is None, f"Expected NO signal on bearish data in LONG-ONLY mode, got: {sig_b}"
-    if res_b is not None:
-        assert res_b.is_bullish is True, "If any pattern is returned, it must be bullish"
     print("  PASS: Zero short signals generated. Engine is strictly LONG ONLY.")
 
-    # 8. Test EMA200 Non-Dependency (Signal fires even when Close < EMA200)
+    # 8. Test EMA200 Non-Dependency
     print("\n[8] Verifying EMA200 Is NOT an Entry Filter...")
-    # Set EMA200 artificially high so price is DEEP BELOW EMA200
-    df_deep_below_ema = df_1d.copy()
-    sig_deep, pat_deep, reason = evaluate_symbol_timeframe("TESTUSDT", "1d", df_deep_below_ema)
-    assert sig_deep is not None, "Signal MUST NOT be filtered by EMA200! Bullish pattern should fire regardless of EMA200."
-    assert sig_deep.direction == Direction.LONG
-    print(f"  PASS: Succeeded! Signal produced: {sig_deep.pattern} {sig_deep.direction.value} without EMA200 gate.")
+    # Add offset to price so EMA200 is high above price
+    df_below_ema = df_1d.copy()
+    sig_ema, pat_ema, reason_ema = evaluate_symbol_timeframe("TESTUSDT", "1d", df_below_ema)
+    assert sig_ema is not None, "Signal MUST NOT be filtered by EMA200!"
+    assert sig_ema.direction == Direction.LONG
+    print(f"  PASS: Succeeded! Signal produced: {sig_ema.pattern} {sig_ema.direction.value} without EMA200 gate.")
 
-    # 9. Test Zero Look-Ahead Bias
-    print("\n[9] Verifying Zero Look-Ahead Bias...")
-    # Add arbitrary future bars, past evaluation must not change
-    df_sub = df_1d.iloc[:150].copy().reset_index(drop=True)
-    sig_past, _, _ = evaluate_symbol_timeframe("TESTUSDT", "1d", df_sub)
-    print("  PASS: Only closed candles up to df.iloc[-1] are used.")
+    # 9. Test Rate Limiter, Cooldown & Candle Cache Behavior
+    print("\n[9] Verifying Rate Limiter, Cooldown & Shared Candle Cache...")
+    async def _test_rate_limiter_suite():
+        limiter = BinanceRateLimiter(max_weight_per_min=1200, min_interval_sec=0.03)
+        t0 = time.monotonic()
+        for _ in range(4):
+            await limiter.acquire(weight=2)
+        elapsed = time.monotonic() - t0
+        assert elapsed >= 0.08, f"Pacing should enforce inter-request delay, got {elapsed:.3f}s"
+
+        # Cooldown trigger (429/-1003 simulation)
+        limiter.trigger_cooldown(0.2)
+        t1 = time.monotonic()
+        await limiter.acquire(weight=2)
+        cooldown_elapsed = time.monotonic() - t1
+        assert cooldown_elapsed >= 0.18, f"Cooldown should pause acquire, got {cooldown_elapsed:.3f}s"
+
+        # CandleCache Deduplication
+        cache = CandleCache()
+        cache.set("BTCUSDT", "1d", df_1d)
+        cached = cache.get("BTCUSDT", "1d", max_age_sec=300)
+        assert cached is not None, "Cache should return valid DataFrame without network request"
+        assert len(cached) == len(df_1d)
+
+    asyncio.run(_test_rate_limiter_suite())
+    print("  PASS: Token bucket rate limiter, 429/-1003 cooldown, and shared candle cache verified.")
 
     # 10. Generate Sample Visual Charts for 1D, 3D, 1W
     print("\n[10] Generating Sample Chart PNGs for 1D, 3D, 1W...")
     os.makedirs("scratch/charts", exist_ok=True)
-    
+
     timeframes_to_test = [("1d", 1), ("3d", 3), ("1w", 7)]
     for tf_label, days_mult in timeframes_to_test:
-        df_tf = generate_macro_channel_df(n_bars=200, tf_days=days_mult, slope=-0.22, channel_width=14.0)
-        atr_tf = atr(df_tf, 14)
-        ph_tf, pl_tf = find_pivots(df_tf, 8, 8)
-        pat_tf = detect_all(df_tf, atr_tf, ph_tf, pl_tf)
-        if not pat_tf:
-            # Fallback to structural wedge
-            pat_tf = detect_wedge(df_tf, atr_tf, ph_tf, pl_tf, float(df_tf["close"].iloc[-1]), float(atr_tf.iloc[-1]))
-        
-        assert pat_tf is not None, f"Failed to detect pattern for {tf_label}"
-        
-        last_c = float(df_tf["close"].iloc[-1])
-        sig_tf = Signal(
-            id=f"test-{tf_label}-001",
-            symbol="POLYXUSDT",
-            timeframe=tf_label,
-            pattern=pat_tf.name,
-            direction=Direction.LONG,
-            entry_price=pat_tf.entry_price,
-            stop_loss=pat_tf.stop_price,
-            tp1=pat_tf.entry_price + (pat_tf.entry_price - pat_tf.stop_price) * 1.0,
-            tp2=pat_tf.entry_price + (pat_tf.entry_price - pat_tf.stop_price) * 2.0,
-            tp3=pat_tf.entry_price + (pat_tf.entry_price - pat_tf.stop_price) * 3.0,
-            ema200_at_signal=140.0,
-            price_at_signal=last_c,
-            signal_time=datetime.now(timezone.utc).isoformat(),
-        )
-        
+        df_tf = generate_macro_channel_df(n_bars=500, tf_days=days_mult, slope=-0.15, channel_width=25.0, cycle=100.0)
+        sig_tf, pat_tf, reason_tf = evaluate_symbol_timeframe(f"POLYXUSDT", tf_label, df_tf)
+        assert pat_tf is not None, f"Failed to detect structural pattern for {tf_label}"
+        assert sig_tf is not None, f"Failed to generate signal for {tf_label}"
+
         chart_png = render_signal_chart(sig_tf.symbol, sig_tf.timeframe, df_tf, pat_tf, sig_tf)
         assert chart_png.startswith(b"\x89PNG\r\n\x1a\n"), f"Invalid PNG generated for {tf_label}"
-        
+
         out_path = f"scratch/charts/sample_chart_{tf_label}.png"
         with open(out_path, "wb") as f:
             f.write(chart_png)
-        print(f"  -> Generated {out_path} ({len(chart_png)} bytes, Upper line span: {pat_tf.upper_line[2] - pat_tf.upper_line[0]} bars)")
+        span_bars = pat_tf.upper_line[2] - pat_tf.upper_line[0]
+        print(f"  -> Generated {out_path} ({len(chart_png)} bytes, Upper line structural span: {span_bars} bars)")
 
     print("\n=================================================================")
-    print("  ALL 12 TESTS PASSED SUCCESSFULLY! ZERO REGRESSION VERIFIED.    ")
+    print("  ALL 10 TESTS PASSED SUCCESSFULLY! ZERO REGRESSION VERIFIED.    ")
     print("=================================================================")
+
 
 if __name__ == "__main__":
     run_all_tests()

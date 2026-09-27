@@ -51,15 +51,19 @@ class Settings:
     timeframes: tuple = ("1d", "3d", "1w")
 
 
-    # --- Long Structural Trendline Parameters ---
+    # --- 65 Fractal Period & Structural Trendline Parameters ---
+    structural_fractal_period: int = _int("STRUCTURAL_FRACTAL_PERIOD", 65)
+    structural_min_span: int = _int("STRUCTURAL_MIN_SPAN", 65)
+    trendline_min_pivot_dist: int = _int("TRENDLINE_MIN_PIVOT_DIST", 20)
     trendline_min_touches: int = _int("TRENDLINE_MIN_TOUCHES", 2)
-    trendline_touch_tol_atr: float = _float("TRENDLINE_TOUCH_TOL_ATR", 0.40)
-    major_pivot_lb: int = _int("MAJOR_PIVOT_LB", 15)
-    medium_pivot_lb: int = _int("MEDIUM_PIVOT_LB", 8)
+    trendline_touch_tol_atr: float = _float("TRENDLINE_TOUCH_TOL_ATR", 0.35)
+    trendline_max_violations: int = _int("TRENDLINE_MAX_VIOLATIONS", 1)
+    major_pivot_lb: int = _int("MAJOR_PIVOT_LB", 65)
+    medium_pivot_lb: int = _int("MEDIUM_PIVOT_LB", 25)
 
     # --- Pivot / pattern detection (mirrors the Pine Script inputs) ---
-    lb_left: int = _int("LB_LEFT", 10)
-    lb_right: int = _int("LB_RIGHT", 10)
+    lb_left: int = _int("LB_LEFT", 65)
+    lb_right: int = _int("LB_RIGHT", 20)
     cooldown_bars: int = _int("COOLDOWN_BARS", 5)
     sym_tol: float = _float("SYM_TOL_PCT", 10.0) / 100
     lvl_tol: float = _float("LVL_TOL_PCT", 3.0) / 100
@@ -93,9 +97,13 @@ class Settings:
     scan_interval_sec: int = _int("SCAN_INTERVAL_SEC", 60)
     tracker_interval_sec: int = _int("TRACKER_INTERVAL_SEC", 30)
 
-    # --- Concurrency & Timeouts ---
+    # --- Concurrency, Caching & Rate Limiting ---
     request_timeout_sec: float = _float("REQUEST_TIMEOUT_SEC", 30.0)
-    max_tracker_concurrency: int = _int("MAX_TRACKER_CONCURRENCY", 5)
+    scanner_concurrency: int = _int("SCANNER_CONCURRENCY", 3)
+    max_tracker_concurrency: int = _int("MAX_TRACKER_CONCURRENCY", 2)
+    rate_limit_weight_per_min: int = _int("RATE_LIMIT_WEIGHT_PER_MIN", 1200)  # Conservative 50% of Binance 2400 limit
+    rate_limit_min_interval_sec: float = _float("RATE_LIMIT_MIN_INTERVAL_SEC", 0.05)
+    candle_cache_ttl_sec: int = _int("CANDLE_CACHE_TTL_SEC", 300)  # 5 minutes minimum cache
     notification_max_attempts: int = _int("NOTIFICATION_MAX_ATTEMPTS", 10)
     rate_limit_delay_sec: float = _float("RATE_LIMIT_DELAY_SEC", 0.05)
 

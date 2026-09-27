@@ -34,20 +34,24 @@ def fit_structural_trendline(
     pivots: list[Pivot],
     is_upper: bool,
     atr_series: pd.Series,
-    min_span: int = 15,
-    max_span: int = 250,
+    min_span: Optional[int] = None,
+    min_pivot_dist: Optional[int] = None,
+    max_span: int = 500,
 ) -> Optional[StructuralTrendline]:
-    """Fits the strongest structural trendline through swing pivots.
+    """Fits the strongest structural trendline through 65-fractal swing pivots.
 
     Evaluates:
-    - Major/medium swing anchors (multi-scale lookback).
-    - Touch count within dynamic ATR tolerance (prioritizes 3+ touches, minimum 2).
-    - Slope consistency.
+    - Minimum structural span (enforces settings.structural_min_span, default 65 bars).
+    - Minimum pivot separation (enforces settings.trendline_min_pivot_dist, default 20 bars).
+    - Multi-touch confirmation within dynamic ATR tolerance (minimum settings.trendline_min_touches).
     - Penetration check: verifies price prior to breakout did NOT close through the line.
     - Zero look-ahead bias: only evaluates up to len(df) - 1.
     """
     if len(pivots) < 2:
         return None
+
+    span_threshold = min_span if min_span is not None else settings.structural_min_span
+    pivot_dist_threshold = min_pivot_dist if min_pivot_dist is not None else settings.trendline_min_pivot_dist
 
     last_idx = len(df) - 1
     piv_sorted = sorted(pivots, key=lambda p: p.index)
@@ -64,10 +68,10 @@ def fit_structural_trendline(
         for j in range(i + 1, len(candidates)):
             p2 = candidates[j]
             span = p2.index - p1.index
-            if span < 6:
+            if span < pivot_dist_threshold:
                 continue
             total_span = last_idx - p1.index
-            if total_span < min_span:
+            if total_span < span_threshold:
                 continue
 
             dx = p2.index - p1.index
@@ -75,7 +79,7 @@ def fit_structural_trendline(
             slope = dy / dx
             intercept = p1.price - slope * p1.index
 
-            # Count touches across all available pivots between p1 and last_idx
+            # Count touches across all available pivots and intermediate swings
             touches = 0
             touch_idxs = []
             for p in candidates:
@@ -84,8 +88,10 @@ def fit_structural_trendline(
                 expected_y = slope * p.index + intercept
                 tol = atr_series.iloc[p.index] * settings.trendline_touch_tol_atr
                 if abs(p.price - expected_y) <= tol:
-                    touches += 1
-                    touch_idxs.append(p.index)
+                    # Enforce that touches are separated by at least 5 bars
+                    if not touch_idxs or (p.index - touch_idxs[-1] >= 5):
+                        touches += 1
+                        touch_idxs.append(p.index)
 
             if touches < settings.trendline_min_touches:
                 continue
@@ -106,13 +112,13 @@ def fit_structural_trendline(
                 diffs = (line_vals - atr_vals * 0.35) - close_vals
                 violations = int(np.sum(diffs > 0))
 
-            if violations > 2:
+            if violations > settings.trendline_max_violations:
                 continue
 
             # Scoring: strong bonus for 3+ touches, reward longer structural span, penalize violations
-            score = (touches * 30.0) + (total_span * 0.2) - (violations * 70.0)
+            score = (touches * 35.0) + (total_span * 0.25) - (violations * 80.0)
             if touches >= 3:
-                score += 40.0
+                score += 50.0
 
             if score > best_score:
                 best_score = score
@@ -165,7 +171,7 @@ def _breakout_ok(df: pd.DataFrame, atr_series: pd.Series, x1: int, y1: float,
 
     ref_idx = recent_ref_idx if recent_ref_idx is not None else (min(x1, x2) if max(x1, x2) >= last_idx else max(x1, x2))
     bars_since_pattern = last_idx - ref_idx
-    max_allowed_delay = max(30, settings.cooldown_bars * 5)
+    max_allowed_delay = max(settings.structural_fractal_period * 2, 80)
     if bars_since_pattern < 1 or bars_since_pattern > max_allowed_delay:
         return False
 
@@ -241,32 +247,6 @@ def detect_wedge(df, atr_series, ph: list[Pivot], pl: list[Pivot], price: float,
                             upper_line=(upper_tl.origin_idx, upper_tl.origin_price, last, upper_tl.end_price),
                             lower_line=(lower_tl.origin_idx, lower_tl.origin_price, last, lower_tl.end_price),
                         )
-
-    # Standard fallback if structural fit is not found
-    if len(ph) >= 2 and len(pl) >= 2:
-        h1, h2, l1, l2 = ph[0], ph[1], pl[0], pl[1]
-        slope_u = (h1.price - h2.price) / max(1, h1.index - h2.index)
-        slope_l = (l1.price - l2.price) / max(1, l1.index - l2.index)
-        proj_u_now = project(h2.index, h2.price, h1.index, h1.price, last)
-        proj_l_now = project(l2.index, l2.price, l1.index, l1.price, last)
-        if proj_u_now > proj_l_now and slope_u < 0 and slope_l < 0 and slope_l < slope_u:
-            if _breakout_ok(df, atr_series, h2.index, h2.price, h1.index, h1.price, True):
-                entry = _entry_price(df)
-                wedge_h = abs(h2.price - l2.price)
-                target = max(h2.price, proj_u_now + wedge_h)
-                stop = entry - (target - entry) * settings.sl_pct_of_target_dist
-                if _rr_ok(entry, stop, target, True):
-                    return PatternResult(
-                        name="Falling Wedge",
-                        is_bullish=True,
-                        start_idx=min(h2.index, l2.index),
-                        breakout_idx=last,
-                        entry_price=entry,
-                        stop_price=stop,
-                        target_price=target,
-                        upper_line=(h2.index, h2.price, last, proj_u_now),
-                        lower_line=(l2.index, l2.price, last, proj_l_now),
-                    )
     return None
 
 
@@ -347,35 +327,6 @@ def detect_triangle(df, atr_series, ph: list[Pivot], pl: list[Pivot], price: flo
                             target_price=target,
                             upper_line=(upper_tl.origin_idx, upper_tl.origin_price, last, upper_tl.end_price),
                             lower_line=(lower_tl.origin_idx, lower_tl.origin_price, last, lower_tl.end_price),
-                        )
-
-    # Standard fallback
-    if len(ph) >= 2 and len(pl) >= 2:
-        h1, h2, l1, l2 = ph[0], ph[1], pl[0], pl[1]
-        slope_u = (h1.price - h2.price) / max(1, h1.index - h2.index)
-        slope_l = (l1.price - l2.price) / max(1, l1.index - l2.index)
-        flat_tol = price * 0.0005
-        base_h = abs(h2.price - l2.price)
-        proj_u = project(h2.index, h2.price, h1.index, h1.price, last)
-        proj_l = project(l2.index, l2.price, l1.index, l1.price, last)
-        if proj_u > proj_l and _valid_size(base_h, price, atr_val):
-            if (slope_u < 0 and slope_l > 0) or (abs(slope_u) < flat_tol and slope_l > 0):
-                if _breakout_ok(df, atr_series, h2.index, h2.price, h1.index, h1.price, True):
-                    entry = _entry_price(df)
-                    target = proj_u + base_h
-                    stop = entry - (target - entry) * settings.sl_pct_of_target_dist
-                    if _rr_ok(entry, stop, target, True):
-                        name = "Ascending Triangle" if abs(slope_u) < flat_tol else "Symmetrical Triangle"
-                        return PatternResult(
-                            name=name,
-                            is_bullish=True,
-                            start_idx=min(h2.index, l2.index),
-                            breakout_idx=last,
-                            entry_price=entry,
-                            stop_price=stop,
-                            target_price=target,
-                            upper_line=(h2.index, h2.price, last, proj_u),
-                            lower_line=(l2.index, l2.price, last, proj_l),
                         )
     return None
 
