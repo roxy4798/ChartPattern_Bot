@@ -244,7 +244,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Total PnL:</b> {o.total_pnl:+.2f}%\n",
         "⏱ <b>BY TIMEFRAME</b>",
     ]
-    for tf in ("1d", "4h", "1h", "15m"):
+    for tf in settings.timeframes:
         b = report.by_timeframe.get(tf)
         if b and b.signals:
             lines.append(f"• {_bucket_line(tf.upper(), b)}")
@@ -390,8 +390,8 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "NeoElla Trade is online.\n\n"
-        "Professional multi-timeframe market analysis with pattern detection, "
-        "EMA 200 trend alignment, and structured TP/SL tracking.\n\n"
+        "Professional multi-timeframe market analysis with structural pattern detection "
+        "and structured TP/SL tracking.\n\n"
         "Use /help to see all available commands."
     )
 

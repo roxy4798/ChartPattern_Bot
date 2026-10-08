@@ -6,6 +6,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from bot.config import settings
 from bot.database import Database
