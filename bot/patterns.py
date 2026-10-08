@@ -38,7 +38,7 @@ def fit_structural_trendline(
     min_pivot_dist: Optional[int] = None,
     max_span: int = 500,
 ) -> Optional[StructuralTrendline]:
-    """Fits the strongest structural trendline through 65-fractal swing pivots.
+    """Fits the strongest structural trendline through 30-fractal swing pivots.
 
     Evaluates:
     - Minimum structural span (enforces settings.structural_min_span, default 65 bars).

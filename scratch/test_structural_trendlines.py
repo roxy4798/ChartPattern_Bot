@@ -23,7 +23,7 @@ from bot.binance_client import BinanceRateLimiter, CandleCache
 
 
 def generate_macro_channel_df(n_bars=500, tf_days=1, slope=-0.15, channel_width=25.0, cycle=100.0):
-    """Generates realistic macro descending channel / wedge across n_bars with 4+ distinct 65-fractal touches."""
+    """Generates realistic macro descending channel / wedge across n_bars with 4+ distinct 30-fractal touches."""
     start_date = datetime(2025, 1, 1, tzinfo=timezone.utc)
     dates = [start_date + timedelta(days=i * tf_days) for i in range(n_bars)]
 
@@ -56,7 +56,7 @@ def generate_macro_channel_df(n_bars=500, tf_days=1, slope=-0.15, channel_width=
 
 def run_all_tests():
     print("=================================================================")
-    print("  RUNNING STRUCTURAL TRENDLINES (65 FRACTAL) & RATE LIMIT SUITE  ")
+    print("  RUNNING STRUCTURAL TRENDLINES (30 FRACTAL) & RATE LIMIT SUITE  ")
     print("=================================================================")
 
     # 1. Test Active Timeframes
@@ -66,24 +66,51 @@ def run_all_tests():
     assert "4h" not in settings.timeframes and "1h" not in settings.timeframes and "15m" not in settings.timeframes
     print(f"  PASS: Active timeframes = {settings.timeframes} (No 12h, 4h, 1h, 15m)")
 
-    # 2. Test 65 Fractal Period Extraction
-    print("\n[2] Testing 65 Fractal Period Structural Pivot Extraction...")
+    # 2. Test 30 Fractal Period Structural Pivot Extraction
+    print("\n[2] Testing 30 Fractal Period Structural Pivot Extraction...")
+    assert settings.structural_fractal_period == 30, f"Canonical structural_fractal_period must be 30, got {settings.structural_fractal_period}"
+
+    # 2a. Verify default fractal_period=None consumes canonical settings.structural_fractal_period (30)
     df_1d = generate_macro_channel_df(n_bars=500, tf_days=1)
     struct_ph, struct_pl = find_structural_pivots(
         df_1d,
         fractal_period=settings.structural_fractal_period,
         min_pivot_dist=settings.trendline_min_pivot_dist,
     )
+    struct_ph_def, struct_pl_def = find_structural_pivots(
+        df_1d,
+        min_pivot_dist=settings.trendline_min_pivot_dist,
+    )
+    assert len(struct_ph) == len(struct_ph_def), "Default fractal period must match canonical setting"
+    assert len(struct_pl) == len(struct_pl_def), "Default fractal period must match canonical setting"
     assert len(struct_ph) >= 3, f"Should find at least 3 structural swing highs across 500 bars, got {len(struct_ph)}"
     assert len(struct_pl) >= 3, f"Should find at least 3 structural swing lows across 500 bars, got {len(struct_pl)}"
+
     # Check that structural pivots are sufficiently spaced (no micro-squiggles)
     for i in range(len(struct_ph) - 1):
         dist = abs(struct_ph[i].index - struct_ph[i + 1].index)
         assert dist >= settings.trendline_min_pivot_dist, f"Structural pivots must be >= {settings.trendline_min_pivot_dist} bars apart, got {dist}"
-    print(f"  PASS: Found {len(struct_ph)} structural swing highs and {len(struct_pl)} structural swing lows using period {settings.structural_fractal_period}")
 
-    # 3. Test Long Structural Trendline Fitting (Touches & Span >= 65 bars)
-    print("\n[3] Testing Long Structural Trendline Fitting (Touches & Span)...")
+    # 2b. Mathematical proof that pivot detector is truly operating at 30, not 65:
+    # In a series of 120 bars (no short-series fallback), a peak at index 35:
+    # Under period 30: evaluated in range(30, 100), peak at 35 is detected as a structural pivot.
+    # Under period 65: range starts at 65, so index 35 is never evaluated and never detected.
+    probe_bars = 120
+    df_probe = pd.DataFrame({
+        "high": np.full(probe_bars, 100.0),
+        "low": np.full(probe_bars, 90.0),
+        "close": np.full(probe_bars, 95.0),
+        "open": np.full(probe_bars, 95.0),
+    })
+    df_probe.loc[35, "high"] = 150.0
+    probe_ph_30, _ = find_structural_pivots(df_probe, fractal_period=30, confirmation_bars=20, min_pivot_dist=10)
+    probe_ph_65, _ = find_structural_pivots(df_probe, fractal_period=65, confirmation_bars=20, min_pivot_dist=10)
+    assert len(probe_ph_30) == 1 and probe_ph_30[0].index == 35, "Pivot at index 35 MUST be detected with fractal period 30!"
+    assert len(probe_ph_65) == 0, "Pivot at index 35 MUST NOT be detected with period 65 (proving 30 is active)"
+    print(f"  PASS: Proven detector operates at canonical period 30 (Macro: {len(struct_ph)} highs / {len(struct_pl)} lows, Probe confirmed)")
+
+    # 3. Test Long Structural Trendline Fitting (Touches & Span >= structural_min_span bars)
+    print(f"\n[3] Testing Long Structural Trendline Fitting (Touches & Span >= {settings.structural_min_span})...")
     atr_series = atr(df_1d, 14)
     tl = fit_structural_trendline(df_1d, struct_ph, is_upper=True, atr_series=atr_series)
     assert tl is not None, "Structural trendline should be found on macro channel data"
@@ -93,7 +120,7 @@ def run_all_tests():
     print(f"  PASS: Structural Upper Trendline discovered! Origin bar: {tl.origin_idx} ({tl.span_bars} bars long), Touches: {tl.touches}, Slope: {tl.slope:.4f}")
 
     # 4. Test Rejection of Short / Non-Structural Trendlines
-    print("\n[4] Testing Strict Rejection of Short Trendlines (< 65 bars)...")
+    print(f"\n[4] Testing Strict Rejection of Short Trendlines (< {settings.structural_min_span} bars)...")
     df_short = pd.DataFrame({"close": np.linspace(100, 90, 50)})
     atr_short = pd.Series(np.full(50, 1.0))
     pivots_short = [Pivot(price=100.0, index=10), Pivot(price=95.0, index=30)]

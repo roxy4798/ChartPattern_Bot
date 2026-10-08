@@ -1,7 +1,9 @@
 from __future__ import annotations
+from typing import Optional
 import numpy as np
 import pandas as pd
 from bot.models import Pivot
+from bot.config import settings
 
 
 def ema(series: pd.Series, period: int) -> pd.Series:
@@ -49,21 +51,24 @@ def find_pivots(df: pd.DataFrame, lb_left: int, lb_right: int) -> tuple[list[Piv
 
 def find_structural_pivots(
     df: pd.DataFrame,
-    fractal_period: int = 65,
+    fractal_period: Optional[int] = None,
     confirmation_bars: int = 20,
     min_pivot_dist: int = 20,
 ) -> tuple[list[Pivot], list[Pivot]]:
-    """Extracts major structural pivots using a 65 fractal period.
+    """Extracts major structural pivots using a 30 fractal period.
 
     Pipeline:
     1. A structural pivot high at index i must be the dominant peak across
-       at least `fractal_period` (65) bars in its left neighborhood, confirmed
+       at least `fractal_period` (30) bars in its left neighborhood, confirmed
        by `confirmation_bars` (e.g. 20) subsequent bars.
     2. Cluster suppression: pivots within `min_pivot_dist` are filtered to keep
        only the macro structural extreme (highest high / lowest low).
     3. Strictly zero look-ahead bias (evaluates only closed history up to len(df) - 1 - confirmation_bars).
     4. Returns (pivot_highs, pivot_lows) ordered newest-first.
     """
+    if fractal_period is None:
+        fractal_period = settings.structural_fractal_period
+
     highs = df["high"].values
     lows = df["low"].values
     n = len(df)
@@ -111,13 +116,15 @@ def find_structural_pivots(
 
 def find_multiscale_pivots(
     df: pd.DataFrame,
-    major_lb: int = 65,
+    major_lb: Optional[int] = None,
     medium_lb: int = 25,
 ) -> dict[str, tuple[list[Pivot], list[Pivot]]]:
-    """Extract both 65-fractal structural and medium swing pivots for multi-scale trendline fitting.
+    """Extract both 30-fractal structural and medium swing pivots for multi-scale trendline fitting.
     Returns dict with keys 'structural', 'major' and 'medium', each containing (pivot_highs, pivot_lows)
     ordered newest-first. Zero look-ahead bias.
     """
+    if major_lb is None:
+        major_lb = settings.structural_fractal_period
     struct_ph, struct_pl = find_structural_pivots(df, fractal_period=major_lb)
     medium_ph, medium_pl = find_pivots(df, medium_lb, min(medium_lb, 15))
     return {

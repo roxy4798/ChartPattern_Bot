@@ -5,7 +5,7 @@ import numpy as np
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 from bot.models import PatternResult, Signal
-from bot.indicators import find_pivots
+from bot.indicators import find_pivots, find_structural_pivots
 from bot.config import settings
 
 WATERMARK_TEXT = "NeoElla Trade"
@@ -196,8 +196,12 @@ def render_signal_chart(symbol: str, timeframe: str, df: pd.DataFrame,
                 color=pat_color, alpha=0.06, zorder=1,
             )
 
-        # Plot actual pivots in the detected structure
-        pivot_highs, pivot_lows = find_pivots(df, settings.lb_left, settings.lb_right)
+        # Plot actual structural pivots in the detected structure
+        pivot_highs, pivot_lows = find_structural_pivots(
+            df,
+            fractal_period=settings.structural_fractal_period,
+            min_pivot_dist=settings.trendline_min_pivot_dist,
+        )
         structure_start = max(0, pattern.start_idx)
         for pivot, marker, color in (
             *((p, "^", "#ffb300") for p in pivot_highs

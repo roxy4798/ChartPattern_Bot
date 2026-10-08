@@ -51,18 +51,18 @@ class Settings:
     timeframes: tuple = ("1d", "3d", "1w")
 
 
-    # --- 65 Fractal Period & Structural Trendline Parameters ---
-    structural_fractal_period: int = _int("STRUCTURAL_FRACTAL_PERIOD", 65)
+    # --- Structural Fractal Period & Trendline Parameters ---
+    structural_fractal_period: int = _int("STRUCTURAL_FRACTAL_PERIOD", 30)
     structural_min_span: int = _int("STRUCTURAL_MIN_SPAN", 65)
     trendline_min_pivot_dist: int = _int("TRENDLINE_MIN_PIVOT_DIST", 20)
     trendline_min_touches: int = _int("TRENDLINE_MIN_TOUCHES", 2)
     trendline_touch_tol_atr: float = _float("TRENDLINE_TOUCH_TOL_ATR", 0.35)
     trendline_max_violations: int = _int("TRENDLINE_MAX_VIOLATIONS", 1)
-    major_pivot_lb: int = _int("MAJOR_PIVOT_LB", 65)
+    major_pivot_lb: int = _int("MAJOR_PIVOT_LB", 30)
     medium_pivot_lb: int = _int("MEDIUM_PIVOT_LB", 25)
 
     # --- Pivot / pattern detection (mirrors the Pine Script inputs) ---
-    lb_left: int = _int("LB_LEFT", 65)
+    lb_left: int = _int("LB_LEFT", 30)
     lb_right: int = _int("LB_RIGHT", 20)
     cooldown_bars: int = _int("COOLDOWN_BARS", 5)
     sym_tol: float = _float("SYM_TOL_PCT", 10.0) / 100
