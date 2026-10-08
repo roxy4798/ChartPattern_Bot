@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import aiohttp
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Tuple
@@ -164,10 +165,12 @@ class BinanceMarket:
         self._symbol_universe_cache_time: float = 0.0
 
     async def connect(self):
+        connector = aiohttp.TCPConnector(keepalive_timeout=30.0)
         self._client = await AsyncClient.create(
             api_key=settings.binance_api_key or None,
             api_secret=settings.binance_api_secret or None,
             testnet=settings.use_testnet,
+            session_params={"connector": connector},
         )
         log.info("Connected to Binance Futures API (testnet=%s, rate_limit=%d weight/min)",
                  settings.use_testnet, settings.rate_limit_weight_per_min)
@@ -253,7 +256,9 @@ class BinanceMarket:
                         raise
                     await asyncio.sleep(1.0 * attempt)
             except (BinanceRequestException, asyncio.TimeoutError, TimeoutError, ConnectionError, OSError) as exc:
-                log.warning("Network hiccup on %s %s: %s (attempt %d/%d)", symbol, interval, exc, attempt, max_attempts)
+                err_msg = str(exc).strip()
+                err_desc = err_msg if err_msg.startswith(type(exc).__name__) else (f"{type(exc).__name__}: {err_msg}" if err_msg else type(exc).__name__)
+                log.warning("Network hiccup on %s %s: %s (attempt %d/%d)", symbol, interval, err_desc, attempt, max_attempts)
                 if attempt == max_attempts:
                     raise
                 await asyncio.sleep(1.0 * attempt)
