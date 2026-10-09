@@ -68,6 +68,8 @@ def find_structural_pivots(
     """
     if fractal_period is None:
         fractal_period = settings.structural_fractal_period
+    if fractal_period <= 0 or confirmation_bars < 0:
+        raise ValueError("fractal_period must be positive and confirmation_bars non-negative")
 
     highs = df["high"].values
     lows = df["low"].values
@@ -75,12 +77,7 @@ def find_structural_pivots(
 
     last_valid = n - 1 - confirmation_bars
     if last_valid < fractal_period:
-        # Fallback if history is shorter than full window
-        fractal_period = max(10, min(fractal_period, n // 3))
-        confirmation_bars = max(5, min(confirmation_bars, n // 5))
-        last_valid = n - 1 - confirmation_bars
-        if last_valid < fractal_period:
-            return [], []
+        return [], []
 
     raw_highs: list[Pivot] = []
     raw_lows: list[Pivot] = []

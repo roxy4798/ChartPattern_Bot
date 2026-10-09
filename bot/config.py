@@ -52,8 +52,8 @@ class Settings:
 
 
     # --- Structural Fractal Period & Trendline Parameters ---
-    structural_fractal_period: int = _int("STRUCTURAL_FRACTAL_PERIOD", 30)
-    structural_min_span: int = _int("STRUCTURAL_MIN_SPAN", 65)
+    structural_fractal_period: int = field(default_factory=lambda: _int("STRUCTURAL_FRACTAL_PERIOD", 30))
+    structural_min_span: int = field(default_factory=lambda: _int("STRUCTURAL_MIN_SPAN", 65))
     trendline_min_pivot_dist: int = _int("TRENDLINE_MIN_PIVOT_DIST", 20)
     trendline_min_touches: int = _int("TRENDLINE_MIN_TOUCHES", 2)
     trendline_touch_tol_atr: float = _float("TRENDLINE_TOUCH_TOL_ATR", 0.35)
@@ -138,6 +138,10 @@ class Settings:
             raise ValueError("TP R-multiples must be strictly increasing: 0 < TP1 < TP2 < TP3")
         if self.sl_pct_of_target_dist <= 0:
             raise ValueError("SL_PCT_TARGET_DIST must be positive")
+        if self.structural_fractal_period <= 0:
+            raise ValueError("STRUCTURAL_FRACTAL_PERIOD must be a positive integer")
+        if self.structural_min_span <= 0:
+            raise ValueError("STRUCTURAL_MIN_SPAN must be a positive integer")
         if self.scan_interval_sec <= 0 or self.tracker_interval_sec <= 0:
             raise ValueError("Intervals must be positive")
 
