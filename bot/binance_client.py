@@ -232,33 +232,51 @@ class BinanceMarket:
 
         # 3. Resilient fetch with rate-limiting & backoff
         max_attempts = 4
+        request_started = time.monotonic()
         raw = None
         for attempt in range(1, max_attempts + 1):
             await self._rate_limiter.acquire(weight=req_weight)
+            timeout_scope = asyncio.timeout(settings.request_timeout_sec)
             try:
-                async with asyncio.timeout(settings.request_timeout_sec):
+                async with timeout_scope:
                     raw = await self._client.futures_klines(symbol=symbol, interval=interval, limit=limit + 1)
+                if attempt > 1:
+                    log.info("Kline request recovered for %s %s after %d attempt(s), elapsed=%.2fs",
+                             symbol, interval, attempt, time.monotonic() - request_started)
                 break
             except BinanceAPIException as exc:
                 if exc.code == -1003 or exc.status_code == 429:
                     retry_sec = 60.0
                     if hasattr(exc, "response") and exc.response is not None:
                         retry_sec = float(getattr(exc.response, "headers", {}).get("Retry-After", 60.0))
-                    log.warning("[BINANCE RATE LIMIT] Hit code=%s status=%s on %s %s. Cooling down for %.1fs (attempt %d/%d)...",
-                                exc.code, exc.status_code, symbol, interval, retry_sec, attempt, max_attempts)
+                    elapsed = time.monotonic() - request_started
+                    level = logging.ERROR if attempt == max_attempts else logging.WARNING
+                    log.log(level, "[BINANCE RATE LIMIT] %s %s code=%s status=%s elapsed=%.2fs attempt=%d/%d exception=%s%s",
+                            symbol, interval, exc.code, exc.status_code, elapsed, attempt, max_attempts,
+                            type(exc).__name__, "; exhausted retries" if attempt == max_attempts else f"; cooling down {retry_sec:.1f}s")
                     self._rate_limiter.trigger_cooldown(retry_sec)
                     await asyncio.sleep(retry_sec)
                     if attempt == max_attempts:
                         raise
                 else:
-                    log.warning("Binance API error on %s %s (code=%s): %s", symbol, interval, exc.code, exc.message)
+                    elapsed = time.monotonic() - request_started
+                    level = logging.ERROR if attempt == max_attempts else logging.WARNING
+                    log.log(level, "Binance API error on %s %s code=%s elapsed=%.2fs attempt=%d/%d exception=%s%s",
+                            symbol, interval, exc.code, elapsed, attempt, max_attempts, type(exc).__name__,
+                            "; exhausted retries" if attempt == max_attempts else "; retrying")
                     if attempt == max_attempts:
                         raise
                     await asyncio.sleep(1.0 * attempt)
             except (BinanceRequestException, asyncio.TimeoutError, TimeoutError, ConnectionError, OSError) as exc:
                 err_msg = str(exc).strip()
                 err_desc = err_msg if err_msg.startswith(type(exc).__name__) else (f"{type(exc).__name__}: {err_msg}" if err_msg else type(exc).__name__)
-                log.warning("Network hiccup on %s %s: %s (attempt %d/%d)", symbol, interval, err_desc, attempt, max_attempts)
+                elapsed = time.monotonic() - request_started
+                level = logging.ERROR if attempt == max_attempts else logging.WARNING
+                timeout_source = ("asyncio.timeout deadline" if isinstance(exc, TimeoutError) and timeout_scope.expired()
+                                  else "client/transport")
+                log.log(level, "Network failure on %s %s elapsed=%.2fs attempt=%d/%d exception=%s source=%s: %s%s",
+                        symbol, interval, elapsed, attempt, max_attempts, type(exc).__name__, timeout_source, err_desc,
+                        "; exhausted retries" if attempt == max_attempts else "; retrying")
                 if attempt == max_attempts:
                     raise
                 await asyncio.sleep(1.0 * attempt)
@@ -316,5 +334,3 @@ class BinanceMarket:
             if not np.isfinite(price) or price <= 0:
                 raise ValueError(f"Received invalid mark price {price} for {symbol}")
             return price
-
-

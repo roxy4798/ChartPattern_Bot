@@ -11,6 +11,7 @@ from typing import Optional
 from bot.config import settings
 from bot.database import Database
 from bot.binance_client import BinanceMarket
+from binance.exceptions import BinanceAPIException, BinanceRequestException
 from bot.signal_engine import evaluate_symbol_timeframe
 from bot.chart_generator import render_signal_chart
 from bot.telegram_bot import build_application, Notifier
@@ -125,8 +126,14 @@ async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, squ
                                 square_publisher.publish_signal(sig, pattern, reason, chart_png)
                             )
 
-                    except Exception:
-                        log.debug("[%s] Scan check skipped for %s %s", scan_id, symbol, tf)
+                    except Exception as exc:
+                        if isinstance(exc, (BinanceAPIException, BinanceRequestException, TimeoutError,
+                                            ConnectionError, OSError)):
+                            log.warning("[%s] Scan request failed for %s %s (%s: %s)",
+                                        scan_id, symbol, tf, type(exc).__name__, exc)
+                        else:
+                            log.debug("[%s] Scan check skipped for %s %s (%s)",
+                                      scan_id, symbol, tf, type(exc).__name__)
 
             tasks = [_check_symbol(sym) for sym in symbols]
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -245,7 +252,5 @@ if __name__ == "__main__":
         asyncio.run(run())
     except KeyboardInterrupt:
         log.info("Terminated by KeyboardInterrupt.")
-
-
 
 
