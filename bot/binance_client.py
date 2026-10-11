@@ -390,10 +390,10 @@ class BinanceMarket:
                             f"samples: [{', '.join(gap_samples)}]"
                         )
 
-                    # Upstream boundary gap detected khusus interval 3d (e.g. Binance Futures August 2023 3D realignment).
+                    # 3D candle discontinuity detected on interval 3d.
                     # Retain only the strictly contiguous unbroken suffix ending at the latest closed bar.
                     log.info(
-                        "[%s %s] Upstream boundary gap detected at historical index %d; "
+                        "[%s %s] 3D candle discontinuity detected at historical index %d; "
                         "discarding %d disjoint historical bars and retaining %d strictly contiguous bars",
                         symbol, interval, last_gap_idx, contiguous_start, contiguous_len
                     )
