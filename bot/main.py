@@ -3,6 +3,7 @@ import asyncio
 import logging
 import signal as os_signal
 import sys
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Optional
 from bot.config import settings
 from bot.database import Database
 from bot.binance_client import BinanceMarket
+from binance.exceptions import BinanceAPIException, BinanceRequestException
 from bot.signal_engine import evaluate_symbol_timeframe
 from bot.chart_generator import render_signal_chart
 from bot.telegram_bot import build_application, Notifier
@@ -43,6 +45,25 @@ log = logging.getLogger("main")
 _shutdown = asyncio.Event()
 
 
+def _source_fingerprint() -> tuple[str, str]:
+    """Return a safe source revision and dirty/clean marker for startup logs."""
+    repo = Path(__file__).resolve().parent.parent
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+            capture_output=True, text=True, timeout=2,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=repo, check=True,
+            capture_output=True, text=True, timeout=2,
+        ).stdout
+        if not revision or any(ch.isspace() for ch in revision):
+            return "unknown", "unknown"
+        return revision, "dirty" if status.strip() else "clean"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown", "unknown"
+
+
 async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, square_publisher: Optional[SquarePublisher] = None):
 
     log.info("Scanner engine online (Interval: %ds, Concurrency: %d)", settings.scan_interval_sec, settings.scanner_concurrency)
@@ -52,6 +73,8 @@ async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, squ
         scan_id = str(uuid.uuid4())[:8]
         scan_start = datetime.now(timezone.utc)
         signals_found = 0
+        checked_pairs = 0
+        pair_failures = 0
 
         try:
             symbols = await market.get_symbol_universe()
@@ -61,7 +84,7 @@ async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, squ
             busy_lock = asyncio.Lock()
 
             async def _check_symbol(symbol: str):
-                nonlocal signals_found
+                nonlocal signals_found, checked_pairs, pair_failures
                 if _shutdown.is_set():
                     return
                 for tf in settings.timeframes:
@@ -73,6 +96,7 @@ async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, squ
                     try:
                         async with sem:
                             df = await market.get_klines(symbol, tf, settings.candles_lookback)
+                        checked_pairs += 1
                         if df.empty or len(df) < 220:
                             continue
                         sig, pattern, reason = evaluate_symbol_timeframe(symbol, tf, df, scan_id=scan_id)
@@ -125,8 +149,15 @@ async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, squ
                                 square_publisher.publish_signal(sig, pattern, reason, chart_png)
                             )
 
-                    except Exception:
-                        log.debug("[%s] Scan check skipped for %s %s", scan_id, symbol, tf)
+                    except Exception as exc:
+                        pair_failures += 1
+                        if isinstance(exc, (BinanceAPIException, BinanceRequestException, TimeoutError,
+                                            ConnectionError, OSError)):
+                            log.warning("[%s] Scan request failed for %s %s (%s: %s)",
+                                        scan_id, symbol, tf, type(exc).__name__, exc)
+                        else:
+                            log.debug("[%s] Scan check skipped for %s %s (%s)",
+                                      scan_id, symbol, tf, type(exc).__name__)
 
             tasks = [_check_symbol(sym) for sym in symbols]
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -134,7 +165,16 @@ async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, squ
             await db.set_metadata("last_scan_at", scan_start.isoformat())
             await db.set_metadata("scan_symbols_count", str(len(symbols)))
             await db.set_metadata("last_scan_signals_count", str(signals_found))
-            log.info("Scan completed: %d symbols checked | %d new signal(s) found", len(symbols), signals_found)
+            await db.set_metadata("last_scan_pairs_checked", str(checked_pairs))
+            await db.set_metadata("last_scan_pair_failures", str(pair_failures))
+            await db.set_metadata("last_scan_finished_at", datetime.now(timezone.utc).isoformat())
+            health = market.candle_health()
+            for key, value in health.items():
+                await db.set_metadata(f"binance_{key}", "None" if value is None else str(value))
+            if pair_failures == 0 and checked_pairs > 0:
+                await db.set_metadata("last_successful_scan_at", datetime.now(timezone.utc).isoformat())
+            log.info("Scan completed: %d symbols, %d pairs checked, %d pair failure(s), %d new signal(s)",
+                     len(symbols), checked_pairs, pair_failures, signals_found)
         except Exception:
             log.exception("Scan loop iteration error")
 
@@ -165,6 +205,14 @@ async def run():
 
     market = BinanceMarket()
     await market.connect()
+    source_commit, source_state = _source_fingerprint()
+    log.info(
+        "Runtime fingerprint | commit=%s | source=%s | Binance=%s | "
+        "STRUCTURAL_FRACTAL_PERIOD=%d | STRUCTURAL_MIN_SPAN=%d | timeframes=%s",
+        source_commit, source_state, "TESTNET" if settings.use_testnet else "MAINNET",
+        settings.structural_fractal_period, settings.structural_min_span,
+        ",".join(settings.timeframes),
+    )
 
     app = build_application(db)
     notifier = Notifier(app, settings.telegram_chat_id)
@@ -245,7 +293,5 @@ if __name__ == "__main__":
         asyncio.run(run())
     except KeyboardInterrupt:
         log.info("Terminated by KeyboardInterrupt.")
-
-
 
 

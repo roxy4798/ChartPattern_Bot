@@ -129,6 +129,11 @@ class Settings:
         "Rectangle", "Cup & Handle",
     ))
 
+    def __setattr__(self, name, value):
+        if name == "structural_fractal_period" and value != 30:
+            raise ValueError("STRUCTURAL_FRACTAL_PERIOD must be exactly 30")
+        super().__setattr__(name, value)
+
     def __post_init__(self):
         if self.min_rr <= 0:
             raise ValueError("MIN_RR must be positive")
@@ -138,8 +143,8 @@ class Settings:
             raise ValueError("TP R-multiples must be strictly increasing: 0 < TP1 < TP2 < TP3")
         if self.sl_pct_of_target_dist <= 0:
             raise ValueError("SL_PCT_TARGET_DIST must be positive")
-        if self.structural_fractal_period <= 0:
-            raise ValueError("STRUCTURAL_FRACTAL_PERIOD must be a positive integer")
+        if self.structural_fractal_period != 30:
+            raise ValueError("STRUCTURAL_FRACTAL_PERIOD must be exactly 30")
         if self.structural_min_span <= 0:
             raise ValueError("STRUCTURAL_MIN_SPAN must be a positive integer")
         if self.scan_interval_sec <= 0 or self.tracker_interval_sec <= 0:

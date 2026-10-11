@@ -54,6 +54,16 @@ def _age_label(value: str | None) -> str:
         return "—"
 
 
+def _is_recent(value: str | None, max_age_sec: int) -> bool:
+    if not value:
+        return False
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return 0 <= (datetime.now(timezone.utc) - dt).total_seconds() <= max_age_sec
+    except (TypeError, ValueError):
+        return False
+
+
 def _direction_icon(direction: str) -> str:
     return DIR_EMOJI.get(direction, "⚪")
 
@@ -306,26 +316,30 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent = await db.get_recent_signals(limit=1)
     meta = await db.get_all_metadata()
 
-    now = datetime.now(timezone.utc)
-    
-    last_scan_raw = meta.get("last_scan_at", {}).get("value")
-    last_tracker_raw = meta.get("last_tracker_at", {}).get("value")
+    last_scan_raw = meta.get("last_scan_finished_at", {}).get("value")
+    last_scan_ok_raw = meta.get("last_successful_scan_at", {}).get("value")
+    last_tracker_raw = meta.get("last_tracker_heartbeat_at", {}).get("value")
+    last_tracker_ok_raw = meta.get("last_tracker_success_at", {}).get("value")
     scan_count = meta.get("scan_symbols_count", {}).get("value", "0")
+    scan_failures = meta.get("last_scan_pair_failures", {}).get("value", "0")
     
     scan_age = _age_label(last_scan_raw)
     tracker_age = _age_label(last_tracker_raw)
     
-    scan_status = "🟢 Active" if last_scan_raw else "⚪ Initializing"
-    tracker_status = "🟢 Active" if last_tracker_raw else "⚪ Initializing"
+    scan_status = ("🟢 Recent heartbeat" if _is_recent(last_scan_raw, settings.scan_interval_sec * 2)
+                   else ("⚠️ Stale heartbeat" if last_scan_raw else "⚪ Initializing"))
+    tracker_status = ("🟢 Recent heartbeat" if _is_recent(last_tracker_raw, settings.tracker_interval_sec * 2)
+                      else ("⚠️ Stale heartbeat" if last_tracker_raw else "⚪ Initializing"))
 
     lines = [
         "🟢 <b>NEOELLA TRADE · SYSTEM STATUS</b>\n",
-        f"<b>Scanner:</b> {scan_status} (Last: {scan_age} ago, {scan_count} symbols)",
-        f"<b>Tracker:</b> {tracker_status} (Last: {tracker_age} ago)",
+        f"<b>Scanner:</b> {scan_status} (Last cycle: {scan_age} ago, {scan_count} symbols)",
+        f"<b>Scanner data cycle:</b> last successful { _age_label(last_scan_ok_raw) } ago; last pair failures: {scan_failures}",
+        f"<b>Tracker:</b> {tracker_status} (Last heartbeat: {tracker_age} ago; last successful update: {_age_label(last_tracker_ok_raw)} ago)",
         "<b>Storage:</b> SQLite WAL mode (persistent)",
         f"<b>Open signals:</b> {len(active)}",
         f"<b>Last signal:</b> {_fmt_signal_time(recent[0].signal_time) if recent else 'No signals yet'}",
-        "\n<i>All status information reflects live persisted system heartbeat metadata.</i>",
+        "\n<i>Heartbeat and successful data-cycle status are reported separately.</i>",
     ]
     await update.message.reply_html("\n".join(lines))
 
@@ -339,8 +353,17 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🩺 <b>NEOELLA TRADE · DIAGNOSTIC HEALTH</b>\n",
         "<b>Database:</b> Connected (WAL mode)",
         f"<b>Pending Outbox Notifications:</b> {len(pending)}",
-        f"<b>Last Scanner Heartbeat:</b> {meta.get('last_scan_at', {}).get('value', 'None')}",
-        f"<b>Last Tracker Heartbeat:</b> {meta.get('last_tracker_at', {}).get('value', 'None')}",
+        f"<b>Last Scanner Cycle:</b> {meta.get('last_scan_finished_at', {}).get('value', 'None')}",
+        f"<b>Last Successful Scanner Cycle:</b> {meta.get('last_successful_scan_at', {}).get('value', 'None')}",
+        f"<b>Scanner Pair Failures:</b> {meta.get('last_scan_pair_failures', {}).get('value', 'unknown')}",
+        f"<b>Last Tracker Heartbeat:</b> {meta.get('last_tracker_heartbeat_at', {}).get('value', 'None')}",
+        f"<b>Last Successful Tracker Update:</b> {meta.get('last_tracker_success_at', {}).get('value', 'None')}",
+        f"<b>Tracker Failures:</b> {meta.get('last_tracker_failures', {}).get('value', '0')}",
+        f"<b>Binance successful fetch:</b> {meta.get('binance_last_successful_fetch_at', {}).get('value', 'None')}",
+        f"<b>Binance requests / failures / retries recovered / exhausted / cache hits:</b> "
+        f"{meta.get('binance_requests', {}).get('value', '?')} / {meta.get('binance_failures', {}).get('value', '?')} / "
+        f"{meta.get('binance_recovered', {}).get('value', '?')} / {meta.get('binance_exhausted', {}).get('value', '?')} / "
+        f"{meta.get('binance_cache_hits', {}).get('value', '?')}",
     ]
     if pending:
         lines.append(f"\n⚠️ <b>Outbox Warning:</b> {len(pending)} items awaiting delivery.")

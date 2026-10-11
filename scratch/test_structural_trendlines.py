@@ -93,8 +93,7 @@ def run_all_tests():
 
     # 2b. Mathematical proof that pivot detector is truly operating at 30, not 65:
     # In a series of 120 bars (no short-series fallback), a peak at index 35:
-    # Under period 30: evaluated in range(30, 100), peak at 35 is detected as a structural pivot.
-    # Under period 65: range starts at 65, so index 35 is never evaluated and never detected.
+    # Under the enforced period 30 the peak at index 35 is detected.
     probe_bars = 120
     df_probe = pd.DataFrame({
         "high": np.full(probe_bars, 100.0),
@@ -104,9 +103,12 @@ def run_all_tests():
     })
     df_probe.loc[35, "high"] = 150.0
     probe_ph_30, _ = find_structural_pivots(df_probe, fractal_period=30, confirmation_bars=20, min_pivot_dist=10)
-    probe_ph_65, _ = find_structural_pivots(df_probe, fractal_period=65, confirmation_bars=20, min_pivot_dist=10)
     assert len(probe_ph_30) == 1 and probe_ph_30[0].index == 35, "Pivot at index 35 MUST be detected with fractal period 30!"
-    assert len(probe_ph_65) == 0, "Pivot at index 35 MUST NOT be detected with period 65 (proving 30 is active)"
+    try:
+        find_structural_pivots(df_probe, fractal_period=65, confirmation_bars=20, min_pivot_dist=10)
+        raise AssertionError("Non-30 structural periods must be rejected")
+    except ValueError as exc:
+        assert "exactly 30" in str(exc)
     print(f"  PASS: Proven detector operates at canonical period 30 (Macro: {len(struct_ph)} highs / {len(struct_pl)} lows, Probe confirmed)")
 
     # 3. Test Long Structural Trendline Fitting (Touches & Span >= structural_min_span bars)
@@ -186,10 +188,14 @@ def run_all_tests():
 
         # CandleCache Deduplication
         cache = CandleCache()
-        cache.set("BTCUSDT", "1d", df_1d)
+        cache_df = df_1d.copy()
+        last_closed_open = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=1)
+        cache_df["open_time"] = pd.date_range(end=last_closed_open, periods=len(cache_df), freq="D")
+        cache_df["close_time"] = cache_df["open_time"] + pd.Timedelta(days=1) - pd.Timedelta(milliseconds=1)
+        cache.set("BTCUSDT", "1d", cache_df)
         cached = cache.get("BTCUSDT", "1d", max_age_sec=300)
         assert cached is not None, "Cache should return valid DataFrame without network request"
-        assert len(cached) == len(df_1d)
+        assert len(cached) == len(cache_df)
 
     asyncio.run(_test_rate_limiter_suite())
     print("  PASS: Token bucket rate limiter, 429/-1003 cooldown, and shared candle cache verified.")

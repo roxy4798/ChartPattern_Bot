@@ -44,15 +44,13 @@ def test_1_default_structural_period():
 
 
 def test_2_environment_override():
-    print("\n[Regression 2] Verifying environment override capability...")
+    print("\n[Regression 2] Verifying non-30 environment overrides are rejected...")
     orig_env = os.environ.get("STRUCTURAL_FRACTAL_PERIOD")
     try:
         os.environ["STRUCTURAL_FRACTAL_PERIOD"] = "25"
-        custom_cfg = Settings()
-        assert custom_cfg.structural_fractal_period == 25, (
-            f"Expected environment override to 25, got {custom_cfg.structural_fractal_period}"
-        )
-        print("  PASS: Environment override to 25 successfully verified.")
+        with pytest.raises(ValueError, match="STRUCTURAL_FRACTAL_PERIOD must be exactly 30"):
+            Settings()
+        print("  PASS: Conflicting environment override is rejected.")
     finally:
         if orig_env is not None:
             os.environ["STRUCTURAL_FRACTAL_PERIOD"] = orig_env
@@ -68,11 +66,11 @@ def test_3_invalid_configuration_handling():
     # Test invalid STRUCTURAL_FRACTAL_PERIOD <= 0
     try:
         os.environ["STRUCTURAL_FRACTAL_PERIOD"] = "0"
-        with pytest.raises(ValueError, match="STRUCTURAL_FRACTAL_PERIOD must be a positive integer"):
+        with pytest.raises(ValueError, match="STRUCTURAL_FRACTAL_PERIOD must be exactly 30"):
             Settings()
             
         os.environ["STRUCTURAL_FRACTAL_PERIOD"] = "-10"
-        with pytest.raises(ValueError, match="STRUCTURAL_FRACTAL_PERIOD must be a positive integer"):
+        with pytest.raises(ValueError, match="STRUCTURAL_FRACTAL_PERIOD must be exactly 30"):
             Settings()
 
         # Test invalid STRUCTURAL_MIN_SPAN <= 0
@@ -92,14 +90,17 @@ def test_3_invalid_configuration_handling():
 
     # Test direct indicator invalid parameter handling
     df = pd.DataFrame({"high": [10.0] * 50, "low": [5.0] * 50, "close": [8.0] * 50})
-    with pytest.raises(ValueError, match="fractal_period must be positive"):
+    with pytest.raises(ValueError, match="fractal_period must be exactly 30"):
         find_structural_pivots(df, fractal_period=0)
 
-    with pytest.raises(ValueError, match="fractal_period must be positive"):
+    with pytest.raises(ValueError, match="fractal_period must be exactly 30"):
         find_structural_pivots(df, fractal_period=-5)
 
-    with pytest.raises(ValueError, match="confirmation_bars non-negative"):
+    with pytest.raises(ValueError, match="confirmation_bars must be exactly 20"):
         find_structural_pivots(df, fractal_period=30, confirmation_bars=-1)
+
+    with pytest.raises(ValueError, match="confirmation_bars must be exactly 20"):
+        find_structural_pivots(df, fractal_period=30, confirmation_bars=19)
 
     # Verify short history does not silently clamp; returns empty lists
     short_df = pd.DataFrame({"high": [10.0] * 40, "low": [5.0] * 40, "close": [8.0] * 40})
@@ -125,11 +126,10 @@ def test_4_structural_min_span_independent():
     tl = fit_structural_trendline(df_span_50, pivots_short, is_upper=True, atr_series=atr_series)
     assert tl is None, "Trendline spanning < 65 bars must be rejected"
 
-    # Verifying fractal period changing does not alter structural_min_span
-    orig = settings.structural_fractal_period
-    settings.structural_fractal_period = 15
-    assert settings.structural_min_span == 65, "Changing fractal period must NOT alter structural_min_span"
-    settings.structural_fractal_period = orig
+    # The configured period and minimum span remain separate quantities.
+    independent_cfg = Settings(structural_fractal_period=30, structural_min_span=65)
+    assert independent_cfg.structural_fractal_period == 30
+    assert independent_cfg.structural_min_span == 65
     print("  PASS: Structural minimum span = 65 is enforced completely independently.")
 
 
