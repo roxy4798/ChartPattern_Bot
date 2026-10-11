@@ -162,6 +162,39 @@ class BinanceCandleIntegrityTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("delta=518400000ms", msg)
             self.assertIn("expected=259200000ms", msg)
 
+    async def test_upstream_boundary_gap_with_sufficient_history_retains_contiguous_suffix(self):
+        # 10 historical rows prior to August 2023 boundary, 1-day gap, then 230 contiguous 3d rows
+        interval_ms = 259_200_000
+        start_ts = 1_689_000_000_000
+        disjoint_rows = [
+            [start_ts + i * interval_ms, "1", "2", "0.5", "1.5", "10",
+             start_ts + i * interval_ms + interval_ms - 1, "15", 1, "5", "7.5", "0"]
+            for i in range(10)
+        ]
+        # Step of 86_400_000 (1 day) instead of 259_200_000 (3 days)
+        boundary_ts = disjoint_rows[-1][0] + 86_400_000
+        contiguous_rows = [
+            [boundary_ts + i * interval_ms, "1", "2", "0.5", "1.5", "10",
+             boundary_ts + i * interval_ms + interval_ms - 1, "15", 1, "5", "7.5", "0"]
+            for i in range(230)
+        ]
+        all_rows = disjoint_rows + contiguous_rows
+        market = self.market(all_rows)
+        # Pretend current time is after the last row
+        last_close_dt = pd.Timestamp(contiguous_rows[-1][6], unit="ms", tz="UTC") + pd.Timedelta(hours=1)
+        with patch("bot.binance_client.pd.Timestamp.now", return_value=last_close_dt):
+            result = await market.get_klines("BTCUSDT", "3d", limit=240)
+
+        self.assertEqual(len(result), 230)
+        opens = result["open_time"].dt.as_unit("ms").astype("int64").tolist()
+        # Verify 100% contiguous cadence with zero gaps
+        self.assertEqual([b - a for a, b in zip(opens, opens[1:])], [interval_ms] * 229)
+        self.assertEqual(len(result.attrs["binance_raw_klines"]), 230)
+        # Verify cache hits for limit <= 240
+        cached = market._candle_cache.get("BTCUSDT", "3d", limit=240)
+        self.assertIsNotNone(cached)
+        self.assertEqual(len(cached), 230)
+
     async def test_candle_validation_surfaces_structured_bad_close_and_misaligned(self):
         open_ts = 1_791_504_000_100  # not a multiple of 86_400_000
         close_ts = open_ts + 86_300_000  # not open + 86_399_999
@@ -331,6 +364,19 @@ class SignalValidationDiagnosticsTests(unittest.TestCase):
         self.assertIn("context:", msg)
         self.assertIn("entry_price=1.95", msg)
         self.assertNotIn("target_price", msg)  # only signal prices in map
+
+    def test_rr_ok_rejects_non_positive_and_non_finite_stop_prices(self):
+        from bot.patterns import _rr_ok
+
+        # Negative stop loss (like ATOMUSDT descending channel case)
+        self.assertFalse(_rr_ok(entry=1.95, stop=-0.57525, target=5.317, is_bull=True))
+        # Zero stop loss
+        self.assertFalse(_rr_ok(entry=1.95, stop=0.0, target=5.317, is_bull=True))
+        # Non-finite prices
+        self.assertFalse(_rr_ok(entry=1.95, stop=float("nan"), target=5.317, is_bull=True))
+        self.assertFalse(_rr_ok(entry=float("inf"), stop=1.0, target=5.317, is_bull=True))
+        # Valid positive risk-reward
+        self.assertTrue(_rr_ok(entry=1.95, stop=1.5, target=5.317, is_bull=True))
 
 
 if __name__ == "__main__":

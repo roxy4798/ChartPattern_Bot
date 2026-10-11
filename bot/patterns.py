@@ -197,8 +197,10 @@ def _entry_price(df: pd.DataFrame) -> float:
 
 
 def _rr_ok(entry: float, stop: float, target: float, is_bull: bool) -> bool:
+    if not (np.isfinite(entry) and np.isfinite(stop) and np.isfinite(target)):
+        return False
     if is_bull:
-        if not (stop < entry < target):
+        if not (0 < stop < entry < target):
             return False
         risk = entry - stop
         reward = (target - entry) - (entry * settings.taker_fee_pct * 2)

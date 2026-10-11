@@ -106,7 +106,14 @@ class CandleCache:
             max_age_sec: float = 300.0) -> Optional[pd.DataFrame]:
         key = (symbol.upper(), interval.lower())
         entry = self._cache.get(key)
-        if entry is None or entry.df.empty or (limit is not None and len(entry.df) < limit):
+        if entry is None or entry.df.empty:
+            return None
+        cached_limit = entry.df.attrs.get("requested_limit")
+        has_sufficient_bars = len(entry.df) >= limit if limit is not None else True
+        was_requested_at_or_above_limit = (
+            cached_limit is not None and limit is not None and cached_limit >= limit
+        )
+        if not (has_sufficient_bars or was_requested_at_or_above_limit):
             return None
 
         now_utc = datetime.now(timezone.utc)
@@ -360,21 +367,52 @@ class BinanceMarket:
             else:
                 offset_ms = {"1d": 0, "1w": 345_600_000}[interval.lower()]
                 misaligned = (open_ms % interval_ms != offset_ms).any()
-            missing = len(df) > 1 and (np.diff(open_ms) != interval_ms).any()
+            if len(df) > 1:
+                diffs = np.diff(open_ms)
+                gap_indices = np.where(diffs != interval_ms)[0]
+                if len(gap_indices) > 0:
+                    last_gap_idx = gap_indices[-1]
+                    contiguous_start = last_gap_idx + 1
+                    contiguous_len = len(df) - contiguous_start
+
+                    # Fractal windows and indicators treat adjacent rows as discrete uniform bars.
+                    # At least 220 contiguous bars are required (200 EMA warmup + 20 confirmation bars).
+                    min_contiguous_bars = 220
+                    if contiguous_len < min_contiguous_bars:
+                        self._candle_metrics["validation_failures"] += 1
+                        gap_samples = [
+                            f"idx {i}->{i+1}: open {open_ms[i]} -> {open_ms[i+1]} (delta={diffs[i]}ms, expected={interval_ms}ms)"
+                            for i in gap_indices[:3]
+                        ]
+                        raise ValueError(
+                            f"Misaligned or missing {interval} candles received for {symbol}: "
+                            f"total_candles={len(df)}, missing/gap: {len(gap_indices)} gap(s) found "
+                            f"(latest contiguous suffix has only {contiguous_len} bars < {min_contiguous_bars}); "
+                            f"samples: [{', '.join(gap_samples)}]"
+                        )
+
+                    # Upstream boundary gap detected (e.g. Binance Futures August 2023 3D realignment).
+                    # Retain only the strictly contiguous unbroken suffix ending at the latest closed bar.
+                    log.info(
+                        "[%s %s] Upstream boundary gap detected at historical index %d; "
+                        "discarding %d disjoint historical bars and retaining %d strictly contiguous bars",
+                        symbol, interval, last_gap_idx, contiguous_start, contiguous_len
+                    )
+                    df = df.iloc[contiguous_start:].reset_index(drop=True)
+                    raw_indices = raw_indices[contiguous_start:]
+                    open_ms = open_ms[contiguous_start:]
+                    close_ms = close_ms[contiguous_start:]
+
+            if interval.lower() == "3d":
+                misaligned = False
+            else:
+                offset_ms = {"1d": 0, "1w": 345_600_000}[interval.lower()]
+                misaligned = (open_ms % interval_ms != offset_ms).any()
+
             bad_close = (close_ms != open_ms + interval_ms - 1).any()
-            if misaligned or missing or bad_close:
+            if misaligned or bad_close:
                 self._candle_metrics["validation_failures"] += 1
                 diag_parts = []
-                if missing:
-                    diffs = np.diff(open_ms)
-                    gap_indices = np.where(diffs != interval_ms)[0]
-                    gap_samples = [
-                        f"idx {i}->{i+1}: open {open_ms[i]} -> {open_ms[i+1]} (delta={diffs[i]}ms, expected={interval_ms}ms)"
-                        for i in gap_indices[:3]
-                    ]
-                    diag_parts.append(
-                        f"missing/gap: {len(gap_indices)} gap(s) found; samples: [{', '.join(gap_samples)}]"
-                    )
                 if misaligned:
                     bad_phase = np.where(open_ms % interval_ms != offset_ms)[0]
                     phase_samples = [
@@ -402,6 +440,7 @@ class BinanceMarket:
         # Store validated closed candles in centralized cache
         # Keep the source rows untouched for exact audit comparisons. Numeric
         # columns above are calculation-friendly conversions of these values.
+        df.attrs["requested_limit"] = limit
         df.attrs["binance_raw_klines"] = tuple(raw_klines[index] for index in raw_indices)
         df.attrs["fetched_at_utc"] = now_utc.isoformat()
         df.attrs["cache_hit"] = False
