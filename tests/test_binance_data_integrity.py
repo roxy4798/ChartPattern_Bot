@@ -195,6 +195,90 @@ class BinanceCandleIntegrityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(cached)
         self.assertEqual(len(cached), 230)
 
+    async def test_one_day_gap_fails_closed_even_with_large_contiguous_suffix(self):
+        # 10 daily rows, 2-day gap, then 230 contiguous daily rows (all phase-aligned at 00:00 UTC)
+        interval_ms = 86_400_000
+        first_open = 1_700_000_000_000 - (1_700_000_000_000 % interval_ms)
+        disjoint_rows = [
+            [first_open + i * interval_ms, "1", "2", "0.5", "1.5", "10",
+             first_open + i * interval_ms + interval_ms - 1, "15", 1, "5", "7.5", "0"]
+            for i in range(10)
+        ]
+        # Skip 2 days (gap)
+        boundary_open = disjoint_rows[-1][0] + 2 * interval_ms
+        contiguous_rows = [
+            [boundary_open + i * interval_ms, "1", "2", "0.5", "1.5", "10",
+             boundary_open + i * interval_ms + interval_ms - 1, "15", 1, "5", "7.5", "0"]
+            for i in range(230)
+        ]
+        all_rows = disjoint_rows + contiguous_rows
+        market = self.market(all_rows)
+        last_close_dt = pd.Timestamp(contiguous_rows[-1][6], unit="ms", tz="UTC") + pd.Timedelta(hours=1)
+        with patch("bot.binance_client.pd.Timestamp.now", return_value=last_close_dt):
+            with self.assertRaises(ValueError) as ctx:
+                await market.get_klines("BTCUSDT", "1d", limit=240)
+            msg = str(ctx.exception)
+            self.assertIn("Misaligned or missing 1d candles received for BTCUSDT", msg)
+            self.assertIn("missing/gap: 1 gap(s) found", msg)
+
+    async def test_one_week_gap_fails_closed_even_with_large_contiguous_suffix(self):
+        # Weekly rows (Monday 00:00 UTC: ts % 604_800_000 == 345_600_000)
+        interval_ms = 604_800_000
+        offset_ms = 345_600_000
+        base_ts = 1_700_000_000_000
+        first_open = base_ts - (base_ts % interval_ms) + offset_ms
+        if first_open > base_ts:
+            first_open -= interval_ms
+        disjoint_rows = [
+            [first_open + i * interval_ms, "1", "2", "0.5", "1.5", "10",
+             first_open + i * interval_ms + interval_ms - 1, "15", 1, "5", "7.5", "0"]
+            for i in range(10)
+        ]
+        # Skip 2 weeks (gap)
+        boundary_open = disjoint_rows[-1][0] + 2 * interval_ms
+        contiguous_rows = [
+            [boundary_open + i * interval_ms, "1", "2", "0.5", "1.5", "10",
+             boundary_open + i * interval_ms + interval_ms - 1, "15", 1, "5", "7.5", "0"]
+            for i in range(230)
+        ]
+        all_rows = disjoint_rows + contiguous_rows
+        market = self.market(all_rows)
+        last_close_dt = pd.Timestamp(contiguous_rows[-1][6], unit="ms", tz="UTC") + pd.Timedelta(hours=1)
+        with patch("bot.binance_client.pd.Timestamp.now", return_value=last_close_dt):
+            with self.assertRaises(ValueError) as ctx:
+                await market.get_klines("BTCUSDT", "1w", limit=240)
+            msg = str(ctx.exception)
+            self.assertIn("Misaligned or missing 1w candles received for BTCUSDT", msg)
+            self.assertIn("missing/gap: 1 gap(s) found", msg)
+
+    async def test_cache_does_not_treat_trimmed_suffix_as_sufficient_for_larger_limit(self):
+        # 3D cache entry with 230 bars and requested_limit=240
+        now = pd.Timestamp.now(tz="UTC")
+        frame_3d = pd.DataFrame({
+            "open_time": pd.date_range(end=now, periods=230, freq="3D"),
+            "close_time": pd.date_range(end=now, periods=230, freq="3D"),
+        })
+        frame_3d.attrs["requested_limit"] = 240
+        frame_3d.attrs["is_contiguous_boundary_trimmed"] = True
+        cache = CandleCache()
+        cache.set("BTCUSDT", "3d", frame_3d)
+
+        # limit <= 240 returns 230 bars (HIT)
+        self.assertEqual(len(cache.get("BTCUSDT", "3d", limit=240)), 230)
+        # limit=500 requires re-fetch because 240 < 500 (MISS)
+        self.assertIsNone(cache.get("BTCUSDT", "3d", limit=500))
+
+        # 1D cache entry with 230 bars (never boundary trimmed)
+        frame_1d = pd.DataFrame({
+            "open_time": pd.date_range(end=now, periods=230, freq="1D"),
+            "close_time": pd.date_range(end=now, periods=230, freq="1D"),
+        })
+        frame_1d.attrs["requested_limit"] = 500
+        cache.set("BTCUSDT", "1d", frame_1d)
+        # 1D strictly requires len(entry.df) >= limit
+        self.assertEqual(len(cache.get("BTCUSDT", "1d", limit=230)), 230)
+        self.assertIsNone(cache.get("BTCUSDT", "1d", limit=500))
+
     async def test_candle_validation_surfaces_structured_bad_close_and_misaligned(self):
         open_ts = 1_791_504_000_100  # not a multiple of 86_400_000
         close_ts = open_ts + 86_300_000  # not open + 86_399_999
