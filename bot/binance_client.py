@@ -13,7 +13,8 @@ import logging
 import time
 import aiohttp
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional, Dict, Tuple
 import numpy as np
 import pandas as pd
@@ -93,7 +94,6 @@ class BinanceRateLimiter:
 class CandleCacheEntry:
     df: pd.DataFrame
     fetched_at: float
-    latest_close_time: pd.Timestamp
 
 
 class CandleCache:
@@ -102,51 +102,43 @@ class CandleCache:
     def __init__(self):
         self._cache: Dict[Tuple[str, str], CandleCacheEntry] = {}
 
-    def get(self, symbol: str, interval: str, max_age_sec: float = 300.0) -> Optional[pd.DataFrame]:
+    def get(self, symbol: str, interval: str, limit: Optional[int] = None,
+            max_age_sec: float = 300.0) -> Optional[pd.DataFrame]:
         key = (symbol.upper(), interval.lower())
         entry = self._cache.get(key)
-        if entry is None or entry.df.empty:
+        if entry is None or entry.df.empty or (limit is not None and len(entry.df) < limit):
             return None
 
         now_utc = datetime.now(timezone.utc)
         now_ts = time.time()
 
-        # Closed-candle boundary awareness:
-        # A 1d candle only closes at 00:00:00 UTC.
-        # If current time is still within the same day that the latest candle closed,
-        # and cached data is less than max_age_sec, it is 100% current.
-        if interval.lower() == "1d":
-            # Start of current UTC day
-            today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-            # Binance close_time is 23:59:59.999. Adding 1 second brings it to next day 00:00:00.
-            if (entry.latest_close_time + timedelta(seconds=1)) >= today_start:
-                # Latest closed candle is yesterday's close (closed today at 00:00 UTC)
-                return entry.df.copy()
-            # If not yet closed or older, check age
-            if (now_ts - entry.fetched_at) < max_age_sec:
-                return entry.df.copy()
-            return None
+        # A cached row set must not be treated as current across a candle boundary.
+        interval_ms = {"1d": 86_400_000, "3d": 259_200_000, "1w": 604_800_000}.get(interval.lower())
+        if interval_ms is not None and interval.lower() != "3d":
+            now_ms = int(now_utc.timestamp() * 1000)
+            latest_open_ms = int(entry.df["open_time"].iloc[-1].timestamp() * 1000)
+            current_open_ms = (now_ms // interval_ms) * interval_ms
+            if interval.lower() == "1w":
+                monday = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+                current_open_ms = int((monday.timestamp() - monday.weekday() * 86400) * 1000)
+            expected_last_open_ms = current_open_ms - interval_ms
+            if latest_open_ms < expected_last_open_ms:
+                return None
 
-        elif interval.lower() in ("3d", "1w"):
-            # 3D and 1W candles close only every 3 days or once a week.
-            # Cache for at least max_age_sec (or up to 1800s for macro timeframes)
-            effective_ttl = max(max_age_sec, 900.0)
-            if (now_ts - entry.fetched_at) < effective_ttl:
-                return entry.df.copy()
-            return None
-
-        # General fallback TTL for any other intervals
-        if (now_ts - entry.fetched_at) < max_age_sec:
-            return entry.df.copy()
+        effective_ttl = max(max_age_sec, 900.0) if interval.lower() == "3d" else max_age_sec
+        if (now_ts - entry.fetched_at) < effective_ttl:
+            result = entry.df.tail(limit).copy() if limit is not None else entry.df.copy()
+            raw_rows = entry.df.attrs.get("binance_raw_klines")
+            if raw_rows is not None and limit is not None:
+                result.attrs["binance_raw_klines"] = tuple(raw_rows[-len(result):])
+            return result
         return None
 
     def set(self, symbol: str, interval: str, df: pd.DataFrame):
         key = (symbol.upper(), interval.lower())
-        latest_close = df["close_time"].iloc[-1] if not df.empty and "close_time" in df.columns else pd.Timestamp.now(tz=timezone.utc)
         self._cache[key] = CandleCacheEntry(
             df=df.copy(),
             fetched_at=time.time(),
-            latest_close_time=latest_close,
         )
 
     def clear(self):
@@ -163,6 +155,18 @@ class BinanceMarket:
         self._candle_cache = CandleCache()
         self._symbol_universe_cache: list[str] = []
         self._symbol_universe_cache_time: float = 0.0
+        self.last_successful_fetch_at: str | None = None
+        self._candle_metrics = {
+            "requests": 0,
+            "failures": 0,
+            "recovered": 0,
+            "exhausted": 0,
+            "validation_failures": 0,
+            "cache_hits": 0,
+        }
+
+    def candle_health(self) -> dict[str, int | str | None]:
+        return {**self._candle_metrics, "last_successful_fetch_at": self.last_successful_fetch_at}
 
     async def connect(self):
         connector = aiohttp.TCPConnector(keepalive_timeout=30.0)
@@ -220,15 +224,22 @@ class BinanceMarket:
         and automatic 429/-1003 backoff."""
         if not self._client:
             raise RuntimeError("Binance client is not connected")
+        if not 1 <= limit <= 1499:
+            raise ValueError("limit must be between 1 and 1499 because one extra row is requested to identify open candles")
 
         # 1. Check shared in-memory cache
         if not force_refresh:
-            cached_df = self._candle_cache.get(symbol, interval, max_age_sec=settings.candle_cache_ttl_sec)
+            cached_df = self._candle_cache.get(
+                symbol, interval, limit, max_age_sec=settings.candle_cache_ttl_sec
+            )
             if cached_df is not None and not cached_df.empty:
+                cached_df.attrs["cache_hit"] = True
+                self._candle_metrics["cache_hits"] += 1
                 return cached_df
 
-        # 2. Calculate request weight
-        req_weight = 1 if limit < 100 else (2 if limit < 500 else 5)
+        # 2. Calculate weight for the actual API limit (including the extra row).
+        api_limit = limit + 1
+        req_weight = 1 if api_limit < 100 else (2 if api_limit < 500 else 5)
 
         # 3. Resilient fetch with rate-limiting & backoff
         max_attempts = 4
@@ -238,13 +249,16 @@ class BinanceMarket:
             await self._rate_limiter.acquire(weight=req_weight)
             timeout_scope = asyncio.timeout(settings.request_timeout_sec)
             try:
+                self._candle_metrics["requests"] += 1
                 async with timeout_scope:
-                    raw = await self._client.futures_klines(symbol=symbol, interval=interval, limit=limit + 1)
+                    raw = await self._client.futures_klines(symbol=symbol, interval=interval, limit=api_limit)
                 if attempt > 1:
+                    self._candle_metrics["recovered"] += 1
                     log.info("Kline request recovered for %s %s after %d attempt(s), elapsed=%.2fs",
                              symbol, interval, attempt, time.monotonic() - request_started)
                 break
             except BinanceAPIException as exc:
+                self._candle_metrics["failures"] += 1
                 if exc.code == -1003 or exc.status_code == 429:
                     retry_sec = 60.0
                     if hasattr(exc, "response") and exc.response is not None:
@@ -255,9 +269,10 @@ class BinanceMarket:
                             symbol, interval, exc.code, exc.status_code, elapsed, attempt, max_attempts,
                             type(exc).__name__, "; exhausted retries" if attempt == max_attempts else f"; cooling down {retry_sec:.1f}s")
                     self._rate_limiter.trigger_cooldown(retry_sec)
-                    await asyncio.sleep(retry_sec)
                     if attempt == max_attempts:
+                        self._candle_metrics["exhausted"] += 1
                         raise
+                    await asyncio.sleep(retry_sec)
                 else:
                     elapsed = time.monotonic() - request_started
                     level = logging.ERROR if attempt == max_attempts else logging.WARNING
@@ -265,9 +280,11 @@ class BinanceMarket:
                             symbol, interval, exc.code, elapsed, attempt, max_attempts, type(exc).__name__,
                             "; exhausted retries" if attempt == max_attempts else "; retrying")
                     if attempt == max_attempts:
+                        self._candle_metrics["exhausted"] += 1
                         raise
                     await asyncio.sleep(1.0 * attempt)
             except (BinanceRequestException, asyncio.TimeoutError, TimeoutError, ConnectionError, OSError) as exc:
+                self._candle_metrics["failures"] += 1
                 err_msg = str(exc).strip()
                 err_desc = err_msg if err_msg.startswith(type(exc).__name__) else (f"{type(exc).__name__}: {err_msg}" if err_msg else type(exc).__name__)
                 elapsed = time.monotonic() - request_started
@@ -278,20 +295,30 @@ class BinanceMarket:
                         symbol, interval, elapsed, attempt, max_attempts, type(exc).__name__, timeout_source, err_desc,
                         "; exhausted retries" if attempt == max_attempts else "; retrying")
                 if attempt == max_attempts:
+                    self._candle_metrics["exhausted"] += 1
                     raise
                 await asyncio.sleep(1.0 * attempt)
 
         if not raw:
             return pd.DataFrame(columns=COLUMNS)
 
-        df = pd.DataFrame(raw, columns=COLUMNS)
-        for c in ["open", "high", "low", "close", "volume", "quote_volume"]:
+        raw_klines = [tuple(row) for row in raw]
+        df = pd.DataFrame(raw_klines, columns=COLUMNS)
+        df["_raw_row_index"] = np.arange(len(df))
+        for c in ["open", "high", "low", "close"]:
             df[c] = df[c].astype(float)
+        for c in ["volume", "quote_volume", "taker_buy_base", "taker_buy_quote"]:
+            df[c] = df[c].map(Decimal)
         df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
         df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
 
-        # Drop the last (still-forming) candle.
-        df = df.iloc[:-1].reset_index(drop=True)
+        # Keep exactly the requested number of closed candles. Do not assume the
+        # final API row is unfinished: at a boundary Binance may return only
+        # closed rows, or a short response may contain no extra row.
+        now_utc = pd.Timestamp.now(tz="UTC")
+        closed = df["close_time"] < now_utc
+        raw_indices = df.loc[closed, "_raw_row_index"].tail(limit).astype(int).tolist()
+        df = df.loc[closed].tail(limit).drop(columns=["_raw_row_index"]).reset_index(drop=True)
         if df.empty:
             return df
 
@@ -312,9 +339,35 @@ class BinanceMarket:
             or (ohlc[:, 2] > ohlc[:, 3]).any()  # Low > Close
         )
         if is_invalid:
+            self._candle_metrics["validation_failures"] += 1
             raise ValueError(f"Invalid or corrupted OHLC data received for {symbol} {interval}")
 
+        # Fractal windows and tracker logic treat row offsets as elapsed bars.
+        # Refuse gaps or inconsistent phases instead of silently compressing time.
+        interval_ms = {"1d": 86_400_000, "3d": 259_200_000, "1w": 604_800_000}.get(interval.lower())
+        if interval_ms is not None and not df.empty:
+            open_ms = df["open_time"].astype("int64").to_numpy() // 1_000_000
+            close_ms = df["close_time"].astype("int64").to_numpy() // 1_000_000
+            if interval.lower() == "3d":
+                # Binance documents 3d in UTC but does not specify its phase.
+                # Validate only the 72-hour cadence; do not infer a phase.
+                misaligned = False
+            else:
+                offset_ms = {"1d": 0, "1w": 345_600_000}[interval.lower()]
+                misaligned = (open_ms % interval_ms != offset_ms).any()
+            missing = len(df) > 1 and (np.diff(open_ms) != interval_ms).any()
+            bad_close = (close_ms != open_ms + interval_ms - 1).any()
+            if misaligned or missing or bad_close:
+                self._candle_metrics["validation_failures"] += 1
+                raise ValueError(f"Misaligned or missing {interval} candles received for {symbol}")
+
         # Store validated closed candles in centralized cache
+        # Keep the source rows untouched for exact audit comparisons. Numeric
+        # columns above are calculation-friendly conversions of these values.
+        df.attrs["binance_raw_klines"] = tuple(raw_klines[index] for index in raw_indices)
+        df.attrs["fetched_at_utc"] = now_utc.isoformat()
+        df.attrs["cache_hit"] = False
+        self.last_successful_fetch_at = now_utc.isoformat()
         self._candle_cache.set(symbol, interval, df)
         return df
 

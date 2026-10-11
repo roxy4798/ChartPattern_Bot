@@ -1,13 +1,16 @@
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from bot.binance_client import BinanceMarket
 from bot.config import settings
 
 
+BASE_WEEK = 1_704_067_200_000  # Monday 2024-01-01 00:00 UTC
+
+
 def candle(open_time):
-    return [open_time, "1", "2", "0.5", "1.5", "10", open_time + 60000,
+    return [open_time, "1", "2", "0.5", "1.5", "10", open_time + 604800000 - 1,
             "15", 1, "5", "7.5", "0"]
 
 
@@ -20,7 +23,7 @@ class BinanceRetryLoggingTests(unittest.IsolatedAsyncioTestCase):
         return market
 
     async def test_transient_timeout_then_success_is_logged_as_recovered(self):
-        market = self.market([asyncio.TimeoutError(), [candle(0), candle(60000)]])
+        market = self.market([asyncio.TimeoutError(), [candle(BASE_WEEK), candle(BASE_WEEK + 604800000)]])
         with patch("bot.binance_client.asyncio.sleep", new=AsyncMock()), \
              self.assertLogs("binance", level="INFO") as logs:
             df = await market.get_klines("BCHUSDT", "1w", 1)
@@ -63,6 +66,10 @@ class BinanceRetryLoggingTests(unittest.IsolatedAsyncioTestCase):
         market = AsyncMock()
         market.get_symbol_universe.return_value = ["BCHUSDT"]
         market.get_klines.side_effect = asyncio.TimeoutError("request timed out")
+        market.candle_health = MagicMock(return_value={
+            "requests": 1, "failures": 1, "recovered": 0, "exhausted": 1,
+            "validation_failures": 0, "cache_hits": 0, "last_successful_fetch_at": None,
+        })
         db = AsyncMock()
         db.get_active_signals.return_value = []
 
@@ -79,6 +86,10 @@ class BinanceRetryLoggingTests(unittest.IsolatedAsyncioTestCase):
             await main.scan_loop(market, db, AsyncMock())
 
         self.assertTrue(any("Scan request failed for BCHUSDT 1w (TimeoutError" in line for line in logs.output))
+        self.assertTrue(any(call.args[0] == "last_scan_pair_failures" and call.args[1] == "1"
+                            for call in db.set_metadata.await_args_list))
+        self.assertFalse(any(call.args[0] == "last_successful_scan_at"
+                             for call in db.set_metadata.await_args_list))
 
 
 if __name__ == "__main__":

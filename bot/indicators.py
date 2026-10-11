@@ -59,8 +59,8 @@ def find_structural_pivots(
 
     Pipeline:
     1. A structural pivot high at index i must be the dominant peak across
-       at least `fractal_period` (30) bars in its left neighborhood, confirmed
-       by `confirmation_bars` (e.g. 20) subsequent bars.
+       exactly 30 bars in its left neighborhood, confirmed by exactly 20
+       subsequent closed bars.
     2. Cluster suppression: pivots within `min_pivot_dist` are filtered to keep
        only the macro structural extreme (highest high / lowest low).
     3. Strictly zero look-ahead bias (evaluates only closed history up to len(df) - 1 - confirmation_bars).
@@ -68,8 +68,12 @@ def find_structural_pivots(
     """
     if fractal_period is None:
         fractal_period = settings.structural_fractal_period
-    if fractal_period <= 0 or confirmation_bars < 0:
-        raise ValueError("fractal_period must be positive and confirmation_bars non-negative")
+    if fractal_period != 30:
+        raise ValueError("fractal_period must be exactly 30")
+    if confirmation_bars != 20:
+        raise ValueError("confirmation_bars must be exactly 20")
+    if min_pivot_dist <= 0:
+        raise ValueError("min_pivot_dist must be positive")
 
     highs = df["high"].values
     lows = df["low"].values
@@ -122,6 +126,8 @@ def find_multiscale_pivots(
     """
     if major_lb is None:
         major_lb = settings.structural_fractal_period
+    if major_lb != 30:
+        raise ValueError("major_lb must be exactly 30 for structural pivots")
     struct_ph, struct_pl = find_structural_pivots(df, fractal_period=major_lb)
     medium_ph, medium_pl = find_pivots(df, medium_lb, min(medium_lb, 15))
     return {

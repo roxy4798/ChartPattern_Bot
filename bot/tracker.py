@@ -196,23 +196,32 @@ async def _resolve_tp3(db: Database, notifier: Notifier, signal: Signal, hit_tim
 async def run_tracker_once(market: BinanceMarket, db: Database, notifier: Notifier):
     active = await db.get_active_signals()
     if not active:
-        await db.set_metadata("last_tracker_at", datetime.now(timezone.utc).isoformat())
+        now = datetime.now(timezone.utc).isoformat()
+        await db.set_metadata("last_tracker_heartbeat_at", now)
+        await db.set_metadata("last_tracker_success_at", now)
         await db.set_metadata("tracker_active_count", "0")
         await notifier.flush_notifications(db)
         return
 
     log.debug("Tracker evaluating %d active signal(s)...", len(active))
     sem = asyncio.Semaphore(settings.max_tracker_concurrency)
+    failures = 0
 
     async def _safe_check(sig: Signal):
+        nonlocal failures
         async with sem:
             try:
                 await check_signal(market, db, notifier, sig)
             except Exception:
+                failures += 1
                 log.exception("[%s] Tracker failed for %s %s", sig.id[:8], sig.symbol, sig.timeframe)
 
     await asyncio.gather(*(_safe_check(s) for s in active))
-    await db.set_metadata("last_tracker_at", datetime.now(timezone.utc).isoformat())
+    now = datetime.now(timezone.utc).isoformat()
+    await db.set_metadata("last_tracker_heartbeat_at", now)
+    await db.set_metadata("last_tracker_failures", str(failures))
+    if failures == 0:
+        await db.set_metadata("last_tracker_success_at", now)
     await db.set_metadata("tracker_active_count", str(len(active)))
     await notifier.flush_notifications(db)
 

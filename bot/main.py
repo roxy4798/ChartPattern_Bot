@@ -53,6 +53,8 @@ async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, squ
         scan_id = str(uuid.uuid4())[:8]
         scan_start = datetime.now(timezone.utc)
         signals_found = 0
+        checked_pairs = 0
+        pair_failures = 0
 
         try:
             symbols = await market.get_symbol_universe()
@@ -62,7 +64,7 @@ async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, squ
             busy_lock = asyncio.Lock()
 
             async def _check_symbol(symbol: str):
-                nonlocal signals_found
+                nonlocal signals_found, checked_pairs, pair_failures
                 if _shutdown.is_set():
                     return
                 for tf in settings.timeframes:
@@ -74,6 +76,7 @@ async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, squ
                     try:
                         async with sem:
                             df = await market.get_klines(symbol, tf, settings.candles_lookback)
+                        checked_pairs += 1
                         if df.empty or len(df) < 220:
                             continue
                         sig, pattern, reason = evaluate_symbol_timeframe(symbol, tf, df, scan_id=scan_id)
@@ -127,6 +130,7 @@ async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, squ
                             )
 
                     except Exception as exc:
+                        pair_failures += 1
                         if isinstance(exc, (BinanceAPIException, BinanceRequestException, TimeoutError,
                                             ConnectionError, OSError)):
                             log.warning("[%s] Scan request failed for %s %s (%s: %s)",
@@ -141,7 +145,16 @@ async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, squ
             await db.set_metadata("last_scan_at", scan_start.isoformat())
             await db.set_metadata("scan_symbols_count", str(len(symbols)))
             await db.set_metadata("last_scan_signals_count", str(signals_found))
-            log.info("Scan completed: %d symbols checked | %d new signal(s) found", len(symbols), signals_found)
+            await db.set_metadata("last_scan_pairs_checked", str(checked_pairs))
+            await db.set_metadata("last_scan_pair_failures", str(pair_failures))
+            await db.set_metadata("last_scan_finished_at", datetime.now(timezone.utc).isoformat())
+            health = market.candle_health()
+            for key, value in health.items():
+                await db.set_metadata(f"binance_{key}", "None" if value is None else str(value))
+            if pair_failures == 0 and checked_pairs > 0:
+                await db.set_metadata("last_successful_scan_at", datetime.now(timezone.utc).isoformat())
+            log.info("Scan completed: %d symbols, %d pairs checked, %d pair failure(s), %d new signal(s)",
+                     len(symbols), checked_pairs, pair_failures, signals_found)
         except Exception:
             log.exception("Scan loop iteration error")
 
