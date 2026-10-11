@@ -246,11 +246,13 @@ class BinanceMarket:
         request_started = time.monotonic()
         raw = None
         for attempt in range(1, max_attempts + 1):
-            await self._rate_limiter.acquire(weight=req_weight)
             timeout_scope = asyncio.timeout(settings.request_timeout_sec)
             try:
-                self._candle_metrics["requests"] += 1
+                # Bound the limiter wait as well as network I/O. A stalled
+                # limiter must not keep a scanner worker pending indefinitely.
                 async with timeout_scope:
+                    await self._rate_limiter.acquire(weight=req_weight)
+                    self._candle_metrics["requests"] += 1
                     raw = await self._client.futures_klines(symbol=symbol, interval=interval, limit=api_limit)
                 if attempt > 1:
                     self._candle_metrics["recovered"] += 1
