@@ -145,6 +145,154 @@ class BinanceCandleIntegrityTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "Misaligned or missing 3d candles"):
                 await market.get_klines("BTCUSDT", "3d", limit=2)
 
+    async def test_three_day_missing_candle_surfaces_structured_gap_diagnostics(self):
+        first_open = 1_791_158_400_000
+        opens = (first_open, first_open + 2 * 259_200_000)
+        rows = [[ts, "1", "2", "0.5", "1.5", "10", ts + 259_199_999,
+                 "15", 1, "5", "7.5", "0"] for ts in opens]
+        market = self.market(rows)
+        with patch("bot.binance_client.pd.Timestamp.now",
+                   return_value=pd.Timestamp("2026-10-20T00:00:00Z")):
+            with self.assertRaises(ValueError) as ctx:
+                await market.get_klines("BTCUSDT", "3d", limit=2)
+            msg = str(ctx.exception)
+            self.assertIn("Misaligned or missing 3d candles received for BTCUSDT", msg)
+            self.assertIn("total_candles=2", msg)
+            self.assertIn("missing/gap: 1 gap(s) found", msg)
+            self.assertIn("delta=518400000ms", msg)
+            self.assertIn("expected=259200000ms", msg)
+
+    async def test_upstream_boundary_gap_with_sufficient_history_retains_contiguous_suffix(self):
+        # 10 historical rows prior to August 2023 boundary, 1-day gap, then 230 contiguous 3d rows
+        interval_ms = 259_200_000
+        start_ts = 1_689_000_000_000
+        disjoint_rows = [
+            [start_ts + i * interval_ms, "1", "2", "0.5", "1.5", "10",
+             start_ts + i * interval_ms + interval_ms - 1, "15", 1, "5", "7.5", "0"]
+            for i in range(10)
+        ]
+        # Step of 86_400_000 (1 day) instead of 259_200_000 (3 days)
+        boundary_ts = disjoint_rows[-1][0] + 86_400_000
+        contiguous_rows = [
+            [boundary_ts + i * interval_ms, "1", "2", "0.5", "1.5", "10",
+             boundary_ts + i * interval_ms + interval_ms - 1, "15", 1, "5", "7.5", "0"]
+            for i in range(230)
+        ]
+        all_rows = disjoint_rows + contiguous_rows
+        market = self.market(all_rows)
+        # Pretend current time is after the last row
+        last_close_dt = pd.Timestamp(contiguous_rows[-1][6], unit="ms", tz="UTC") + pd.Timedelta(hours=1)
+        with patch("bot.binance_client.pd.Timestamp.now", return_value=last_close_dt):
+            result = await market.get_klines("BTCUSDT", "3d", limit=240)
+
+        self.assertEqual(len(result), 230)
+        opens = result["open_time"].dt.as_unit("ms").astype("int64").tolist()
+        # Verify 100% contiguous cadence with zero gaps
+        self.assertEqual([b - a for a, b in zip(opens, opens[1:])], [interval_ms] * 229)
+        self.assertEqual(len(result.attrs["binance_raw_klines"]), 230)
+        # Verify cache hits for limit <= 240
+        cached = market._candle_cache.get("BTCUSDT", "3d", limit=240)
+        self.assertIsNotNone(cached)
+        self.assertEqual(len(cached), 230)
+
+    async def test_one_day_gap_fails_closed_even_with_large_contiguous_suffix(self):
+        # 10 daily rows, 2-day gap, then 230 contiguous daily rows (all phase-aligned at 00:00 UTC)
+        interval_ms = 86_400_000
+        first_open = 1_700_000_000_000 - (1_700_000_000_000 % interval_ms)
+        disjoint_rows = [
+            [first_open + i * interval_ms, "1", "2", "0.5", "1.5", "10",
+             first_open + i * interval_ms + interval_ms - 1, "15", 1, "5", "7.5", "0"]
+            for i in range(10)
+        ]
+        # Skip 2 days (gap)
+        boundary_open = disjoint_rows[-1][0] + 2 * interval_ms
+        contiguous_rows = [
+            [boundary_open + i * interval_ms, "1", "2", "0.5", "1.5", "10",
+             boundary_open + i * interval_ms + interval_ms - 1, "15", 1, "5", "7.5", "0"]
+            for i in range(230)
+        ]
+        all_rows = disjoint_rows + contiguous_rows
+        market = self.market(all_rows)
+        last_close_dt = pd.Timestamp(contiguous_rows[-1][6], unit="ms", tz="UTC") + pd.Timedelta(hours=1)
+        with patch("bot.binance_client.pd.Timestamp.now", return_value=last_close_dt):
+            with self.assertRaises(ValueError) as ctx:
+                await market.get_klines("BTCUSDT", "1d", limit=240)
+            msg = str(ctx.exception)
+            self.assertIn("Misaligned or missing 1d candles received for BTCUSDT", msg)
+            self.assertIn("missing/gap: 1 gap(s) found", msg)
+
+    async def test_one_week_gap_fails_closed_even_with_large_contiguous_suffix(self):
+        # Weekly rows (Monday 00:00 UTC: ts % 604_800_000 == 345_600_000)
+        interval_ms = 604_800_000
+        offset_ms = 345_600_000
+        base_ts = 1_700_000_000_000
+        first_open = base_ts - (base_ts % interval_ms) + offset_ms
+        if first_open > base_ts:
+            first_open -= interval_ms
+        disjoint_rows = [
+            [first_open + i * interval_ms, "1", "2", "0.5", "1.5", "10",
+             first_open + i * interval_ms + interval_ms - 1, "15", 1, "5", "7.5", "0"]
+            for i in range(10)
+        ]
+        # Skip 2 weeks (gap)
+        boundary_open = disjoint_rows[-1][0] + 2 * interval_ms
+        contiguous_rows = [
+            [boundary_open + i * interval_ms, "1", "2", "0.5", "1.5", "10",
+             boundary_open + i * interval_ms + interval_ms - 1, "15", 1, "5", "7.5", "0"]
+            for i in range(230)
+        ]
+        all_rows = disjoint_rows + contiguous_rows
+        market = self.market(all_rows)
+        last_close_dt = pd.Timestamp(contiguous_rows[-1][6], unit="ms", tz="UTC") + pd.Timedelta(hours=1)
+        with patch("bot.binance_client.pd.Timestamp.now", return_value=last_close_dt):
+            with self.assertRaises(ValueError) as ctx:
+                await market.get_klines("BTCUSDT", "1w", limit=240)
+            msg = str(ctx.exception)
+            self.assertIn("Misaligned or missing 1w candles received for BTCUSDT", msg)
+            self.assertIn("missing/gap: 1 gap(s) found", msg)
+
+    async def test_cache_does_not_treat_trimmed_suffix_as_sufficient_for_larger_limit(self):
+        # 3D cache entry with 230 bars and requested_limit=240
+        now = pd.Timestamp.now(tz="UTC")
+        frame_3d = pd.DataFrame({
+            "open_time": pd.date_range(end=now, periods=230, freq="3D"),
+            "close_time": pd.date_range(end=now, periods=230, freq="3D"),
+        })
+        frame_3d.attrs["requested_limit"] = 240
+        frame_3d.attrs["is_contiguous_boundary_trimmed"] = True
+        cache = CandleCache()
+        cache.set("BTCUSDT", "3d", frame_3d)
+
+        # limit <= 240 returns 230 bars (HIT)
+        self.assertEqual(len(cache.get("BTCUSDT", "3d", limit=240)), 230)
+        # limit=500 requires re-fetch because 240 < 500 (MISS)
+        self.assertIsNone(cache.get("BTCUSDT", "3d", limit=500))
+
+        # 1D cache entry with 230 bars (never boundary trimmed)
+        frame_1d = pd.DataFrame({
+            "open_time": pd.date_range(end=now, periods=230, freq="1D"),
+            "close_time": pd.date_range(end=now, periods=230, freq="1D"),
+        })
+        frame_1d.attrs["requested_limit"] = 500
+        cache.set("BTCUSDT", "1d", frame_1d)
+        # 1D strictly requires len(entry.df) >= limit
+        self.assertEqual(len(cache.get("BTCUSDT", "1d", limit=230)), 230)
+        self.assertIsNone(cache.get("BTCUSDT", "1d", limit=500))
+
+    async def test_candle_validation_surfaces_structured_bad_close_and_misaligned(self):
+        open_ts = 1_791_504_000_100  # not a multiple of 86_400_000
+        close_ts = open_ts + 86_300_000  # not open + 86_399_999
+        rows = [[open_ts, "1", "2", "0.5", "1.5", "10", close_ts,
+                 "15", 1, "5", "7.5", "0"]]
+        market = self.market(rows)
+        with patch("bot.binance_client.pd.Timestamp.now",
+                   return_value=pd.Timestamp("2026-10-20T00:00:00Z")):
+            with self.assertRaises(ValueError) as ctx:
+                await market.get_klines("BTCUSDT", "1d", limit=1)
+            msg = str(ctx.exception)
+            self.assertIn("misaligned: 1 candle(s) with bad phase", msg)
+            self.assertIn("bad_close: 1 candle(s)", msg)
+
     async def test_rejects_excessive_limit_that_cannot_request_extra_row(self):
         market = self.market([])
         with self.assertRaisesRegex(ValueError, "between 1 and 1499"):
@@ -258,6 +406,61 @@ class StructuralFractalConfigurationTests(unittest.TestCase):
             if pattern.start_idx <= pivot.index <= pattern.breakout_idx
         ]
         self.assertEqual(chart_markers, expected_markers)
+
+
+class SignalValidationDiagnosticsTests(unittest.TestCase):
+    def test_validate_signal_surfaces_invalid_field_and_pattern_context(self):
+        from bot.models import Signal, Direction, SignalStatus, PatternResult
+        from bot.signal_engine import _validate_signal
+
+        pattern = PatternResult(
+            name="Descending Channel",
+            is_bullish=True,
+            start_idx=0,
+            breakout_idx=10,
+            entry_price=1.95,
+            stop_price=-0.57525,
+            target_price=5.317,
+        )
+        signal = Signal(
+            id="test-id",
+            symbol="ATOMUSDT",
+            timeframe="1d",
+            pattern="Descending Channel",
+            direction=Direction.LONG,
+            entry_price=1.95,
+            stop_loss=-0.57525,
+            tp1=4.47525,
+            tp2=7.0005,
+            tp3=9.52575,
+            price_at_signal=1.95,
+            signal_time="2026-10-10T00:00:00Z",
+            status=SignalStatus.ACTIVE,
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            _validate_signal(signal, pattern)
+
+        msg = str(ctx.exception)
+        self.assertIn("Signal for ATOMUSDT 1d (Descending Channel)", msg)
+        self.assertIn("non-positive or non-finite prices", msg)
+        self.assertIn("stop_loss=-0.57525", msg)
+        self.assertIn("context:", msg)
+        self.assertIn("entry_price=1.95", msg)
+        self.assertNotIn("target_price", msg)  # only signal prices in map
+
+    def test_rr_ok_rejects_non_positive_and_non_finite_stop_prices(self):
+        from bot.patterns import _rr_ok
+
+        # Negative stop loss (like ATOMUSDT descending channel case)
+        self.assertFalse(_rr_ok(entry=1.95, stop=-0.57525, target=5.317, is_bull=True))
+        # Zero stop loss
+        self.assertFalse(_rr_ok(entry=1.95, stop=0.0, target=5.317, is_bull=True))
+        # Non-finite prices
+        self.assertFalse(_rr_ok(entry=1.95, stop=float("nan"), target=5.317, is_bull=True))
+        self.assertFalse(_rr_ok(entry=float("inf"), stop=1.0, target=5.317, is_bull=True))
+        # Valid positive risk-reward
+        self.assertTrue(_rr_ok(entry=1.95, stop=1.5, target=5.317, is_bull=True))
 
 
 if __name__ == "__main__":

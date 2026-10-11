@@ -106,7 +106,17 @@ class CandleCache:
             max_age_sec: float = 300.0) -> Optional[pd.DataFrame]:
         key = (symbol.upper(), interval.lower())
         entry = self._cache.get(key)
-        if entry is None or entry.df.empty or (limit is not None and len(entry.df) < limit):
+        if entry is None or entry.df.empty:
+            return None
+        has_sufficient_bars = len(entry.df) >= limit if limit is not None else True
+        is_3d_boundary_trimmed = (
+            interval.lower() == "3d" and entry.df.attrs.get("is_contiguous_boundary_trimmed", False)
+        )
+        cached_limit = entry.df.attrs.get("requested_limit")
+        was_requested_at_or_above_limit = (
+            is_3d_boundary_trimmed and cached_limit is not None and limit is not None and cached_limit >= limit
+        )
+        if not (has_sufficient_bars or was_requested_at_or_above_limit):
             return None
 
         now_utc = datetime.now(timezone.utc)
@@ -353,22 +363,91 @@ class BinanceMarket:
             # integer arithmetic; astype(int64) alone is resolution-dependent.
             open_ms = df["open_time"].dt.as_unit("ms").astype("int64").to_numpy()
             close_ms = df["close_time"].dt.as_unit("ms").astype("int64").to_numpy()
+            diffs = np.diff(open_ms) if len(df) > 1 else np.array([], dtype=np.int64)
+            missing = len(df) > 1 and (diffs != interval_ms).any()
+
             if interval.lower() == "3d":
-                # Binance documents 3d in UTC but does not specify its phase.
-                # Validate only the 72-hour cadence; do not infer a phase.
                 misaligned = False
+                if missing:
+                    gap_indices = np.where(diffs != interval_ms)[0]
+                    last_gap_idx = gap_indices[-1]
+                    contiguous_start = last_gap_idx + 1
+                    contiguous_len = len(df) - contiguous_start
+
+                    # Sinyal & fraktal membutuhkan deret waktu kontigu tanpa kompresi waktu.
+                    # Minimal 220 bar diperlukan (200 EMA warmup + 20 bar konfirmasi fraktal).
+                    min_contiguous_bars = 220
+                    if contiguous_len < min_contiguous_bars:
+                        self._candle_metrics["validation_failures"] += 1
+                        gap_samples = [
+                            f"idx {i}->{i+1}: open {open_ms[i]} -> {open_ms[i+1]} (delta={diffs[i]}ms, expected={interval_ms}ms)"
+                            for i in gap_indices[:3]
+                        ]
+                        raise ValueError(
+                            f"Misaligned or missing {interval} candles received for {symbol}: "
+                            f"total_candles={len(df)}, missing/gap: {len(gap_indices)} gap(s) found "
+                            f"(latest contiguous suffix has only {contiguous_len} bars < {min_contiguous_bars}); "
+                            f"samples: [{', '.join(gap_samples)}]"
+                        )
+
+                    # 3D candle discontinuity detected on interval 3d.
+                    # Retain only the strictly contiguous unbroken suffix ending at the latest closed bar.
+                    log.info(
+                        "[%s %s] 3D candle discontinuity detected at historical index %d; "
+                        "discarding %d disjoint historical bars and retaining %d strictly contiguous bars",
+                        symbol, interval, last_gap_idx, contiguous_start, contiguous_len
+                    )
+                    df = df.iloc[contiguous_start:].reset_index(drop=True)
+                    raw_indices = raw_indices[contiguous_start:]
+                    open_ms = open_ms[contiguous_start:]
+                    close_ms = close_ms[contiguous_start:]
+                    df.attrs["is_contiguous_boundary_trimmed"] = True
+                    missing = False
             else:
                 offset_ms = {"1d": 0, "1w": 345_600_000}[interval.lower()]
                 misaligned = (open_ms % interval_ms != offset_ms).any()
-            missing = len(df) > 1 and (np.diff(open_ms) != interval_ms).any()
+
             bad_close = (close_ms != open_ms + interval_ms - 1).any()
             if misaligned or missing or bad_close:
                 self._candle_metrics["validation_failures"] += 1
-                raise ValueError(f"Misaligned or missing {interval} candles received for {symbol}")
+                diag_parts = []
+                if missing:
+                    gap_indices = np.where(diffs != interval_ms)[0]
+                    gap_samples = [
+                        f"idx {i}->{i+1}: open {open_ms[i]} -> {open_ms[i+1]} (delta={diffs[i]}ms, expected={interval_ms}ms)"
+                        for i in gap_indices[:3]
+                    ]
+                    diag_parts.append(
+                        f"missing/gap: {len(gap_indices)} gap(s) found; samples: [{', '.join(gap_samples)}]"
+                    )
+                if misaligned:
+                    bad_phase = np.where(open_ms % interval_ms != offset_ms)[0]
+                    phase_samples = [
+                        f"idx {i}: open={open_ms[i]} (phase={open_ms[i] % interval_ms}ms, expected={offset_ms}ms)"
+                        for i in bad_phase[:3]
+                    ]
+                    diag_parts.append(
+                        f"misaligned: {len(bad_phase)} candle(s) with bad phase; samples: [{', '.join(phase_samples)}]"
+                    )
+                if bad_close:
+                    bad_close_idx = np.where(close_ms != open_ms + interval_ms - 1)[0]
+                    close_samples = [
+                        f"idx {i}: open={open_ms[i]}, close={close_ms[i]} (expected {open_ms[i] + interval_ms - 1})"
+                        for i in bad_close_idx[:3]
+                    ]
+                    diag_parts.append(
+                        f"bad_close: {len(bad_close_idx)} candle(s); samples: [{', '.join(close_samples)}]"
+                    )
+                details = "; ".join(diag_parts)
+                raise ValueError(
+                    f"Misaligned or missing {interval} candles received for {symbol}: "
+                    f"total_candles={len(df)}, {details}"
+                )
 
         # Store validated closed candles in centralized cache
         # Keep the source rows untouched for exact audit comparisons. Numeric
         # columns above are calculation-friendly conversions of these values.
+        df.attrs["requested_limit"] = limit
         df.attrs["binance_raw_klines"] = tuple(raw_klines[index] for index in raw_indices)
         df.attrs["fetched_at_utc"] = now_utc.isoformat()
         df.attrs["cache_hit"] = False

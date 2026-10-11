@@ -16,12 +16,27 @@ log = logging.getLogger("signal_engine")
 
 
 def _validate_signal(signal: Signal, pattern: PatternResult) -> None:
-    prices = (
-        signal.entry_price, signal.stop_loss, signal.tp1, signal.tp2, signal.tp3,
-        signal.price_at_signal
-    )
-    if not all(np.isfinite(p) and p > 0 for p in prices):
-        raise ValueError(f"Signal for {signal.symbol} {signal.timeframe} contains non-positive or non-finite prices")
+    price_map = {
+        "entry_price": signal.entry_price,
+        "stop_loss": signal.stop_loss,
+        "tp1": signal.tp1,
+        "tp2": signal.tp2,
+        "tp3": signal.tp3,
+        "price_at_signal": signal.price_at_signal,
+    }
+    invalid_prices = [
+        f"{field}={val}" for field, val in price_map.items()
+        if not (np.isfinite(val) and val > 0)
+    ]
+    if invalid_prices:
+        all_prices = ", ".join(
+            f"{k}={v:.6g}" if np.isfinite(v) else f"{k}={v}"
+            for k, v in price_map.items()
+        )
+        raise ValueError(
+            f"Signal for {signal.symbol} {signal.timeframe} ({pattern.name}) contains "
+            f"non-positive or non-finite prices: {', '.join(invalid_prices)} [context: {all_prices}]"
+        )
 
     if signal.direction == Direction.LONG:
         valid_order = signal.stop_loss < signal.entry_price < signal.tp1 < signal.tp2 < signal.tp3

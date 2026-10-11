@@ -143,6 +143,50 @@ class BinanceRetryLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(call.args[0] == "binance_failures" and call.args[1] == "0"
                             for call in db.set_metadata.await_args_list))
 
+    async def test_scanner_isolates_signal_with_non_positive_price(self):
+        from bot import main
+
+        market = AsyncMock()
+        market.get_symbol_universe.return_value = ["ATOMUSDT", "BTCUSDT"]
+        market.get_klines.return_value = pd.DataFrame({"close": [1.0] * 220})
+        market.candle_health = MagicMock(return_value={
+            "requests": 2, "failures": 0, "recovered": 0, "exhausted": 0,
+            "validation_failures": 0, "cache_hits": 0, "last_successful_fetch_at": "now",
+        })
+        db = AsyncMock()
+        db.get_active_signals.return_value = []
+
+        evaluated_symbols = []
+
+        def mock_eval(symbol, tf, df, scan_id=None):
+            evaluated_symbols.append(symbol)
+            if symbol == "ATOMUSDT":
+                raise ValueError(
+                    "Signal for ATOMUSDT 1d (Descending Channel) contains non-positive or "
+                    "non-finite prices: stop_loss=-0.57525 [context: entry_price=1.95, stop_loss=-0.57525, tp1=4.47525]"
+                )
+            return None, None, None
+
+        async def finish_scan(awaitable, *args, **kwargs):
+            awaitable.close()
+            main._shutdown.set()
+            raise asyncio.TimeoutError()
+
+        with patch.object(main, "_shutdown", asyncio.Event()), \
+             patch.object(settings, "timeframes", ["1d"]), \
+             patch.object(settings, "scanner_concurrency", 2), \
+             patch.object(main, "evaluate_symbol_timeframe", side_effect=mock_eval), \
+             patch.object(main.asyncio, "wait_for", side_effect=finish_scan), \
+             self.assertLogs("main", level="WARNING") as logs:
+            await main.scan_loop(market, db, AsyncMock())
+
+        self.assertIn("ATOMUSDT", evaluated_symbols)
+        self.assertIn("BTCUSDT", evaluated_symbols)
+        self.assertTrue(any("Scan pair failed for ATOMUSDT 1d (ValueError: Signal for ATOMUSDT 1d (Descending Channel)" in line
+                            for line in logs.output))
+        self.assertTrue(any(call.args[0] == "last_scan_pair_failures" and call.args[1] == "1"
+                            for call in db.set_metadata.await_args_list))
+
 
 if __name__ == "__main__":
     unittest.main()
