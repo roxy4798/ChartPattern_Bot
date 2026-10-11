@@ -145,6 +145,37 @@ class BinanceCandleIntegrityTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "Misaligned or missing 3d candles"):
                 await market.get_klines("BTCUSDT", "3d", limit=2)
 
+    async def test_three_day_missing_candle_surfaces_structured_gap_diagnostics(self):
+        first_open = 1_791_158_400_000
+        opens = (first_open, first_open + 2 * 259_200_000)
+        rows = [[ts, "1", "2", "0.5", "1.5", "10", ts + 259_199_999,
+                 "15", 1, "5", "7.5", "0"] for ts in opens]
+        market = self.market(rows)
+        with patch("bot.binance_client.pd.Timestamp.now",
+                   return_value=pd.Timestamp("2026-10-20T00:00:00Z")):
+            with self.assertRaises(ValueError) as ctx:
+                await market.get_klines("BTCUSDT", "3d", limit=2)
+            msg = str(ctx.exception)
+            self.assertIn("Misaligned or missing 3d candles received for BTCUSDT", msg)
+            self.assertIn("total_candles=2", msg)
+            self.assertIn("missing/gap: 1 gap(s) found", msg)
+            self.assertIn("delta=518400000ms", msg)
+            self.assertIn("expected=259200000ms", msg)
+
+    async def test_candle_validation_surfaces_structured_bad_close_and_misaligned(self):
+        open_ts = 1_791_504_000_100  # not a multiple of 86_400_000
+        close_ts = open_ts + 86_300_000  # not open + 86_399_999
+        rows = [[open_ts, "1", "2", "0.5", "1.5", "10", close_ts,
+                 "15", 1, "5", "7.5", "0"]]
+        market = self.market(rows)
+        with patch("bot.binance_client.pd.Timestamp.now",
+                   return_value=pd.Timestamp("2026-10-20T00:00:00Z")):
+            with self.assertRaises(ValueError) as ctx:
+                await market.get_klines("BTCUSDT", "1d", limit=1)
+            msg = str(ctx.exception)
+            self.assertIn("misaligned: 1 candle(s) with bad phase", msg)
+            self.assertIn("bad_close: 1 candle(s)", msg)
+
     async def test_rejects_excessive_limit_that_cannot_request_extra_row(self):
         market = self.market([])
         with self.assertRaisesRegex(ValueError, "between 1 and 1499"):
@@ -258,6 +289,48 @@ class StructuralFractalConfigurationTests(unittest.TestCase):
             if pattern.start_idx <= pivot.index <= pattern.breakout_idx
         ]
         self.assertEqual(chart_markers, expected_markers)
+
+
+class SignalValidationDiagnosticsTests(unittest.TestCase):
+    def test_validate_signal_surfaces_invalid_field_and_pattern_context(self):
+        from bot.models import Signal, Direction, SignalStatus, PatternResult
+        from bot.signal_engine import _validate_signal
+
+        pattern = PatternResult(
+            name="Descending Channel",
+            is_bullish=True,
+            start_idx=0,
+            breakout_idx=10,
+            entry_price=1.95,
+            stop_price=-0.57525,
+            target_price=5.317,
+        )
+        signal = Signal(
+            id="test-id",
+            symbol="ATOMUSDT",
+            timeframe="1d",
+            pattern="Descending Channel",
+            direction=Direction.LONG,
+            entry_price=1.95,
+            stop_loss=-0.57525,
+            tp1=4.47525,
+            tp2=7.0005,
+            tp3=9.52575,
+            price_at_signal=1.95,
+            signal_time="2026-10-10T00:00:00Z",
+            status=SignalStatus.ACTIVE,
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            _validate_signal(signal, pattern)
+
+        msg = str(ctx.exception)
+        self.assertIn("Signal for ATOMUSDT 1d (Descending Channel)", msg)
+        self.assertIn("non-positive or non-finite prices", msg)
+        self.assertIn("stop_loss=-0.57525", msg)
+        self.assertIn("context:", msg)
+        self.assertIn("entry_price=1.95", msg)
+        self.assertNotIn("target_price", msg)  # only signal prices in map
 
 
 if __name__ == "__main__":

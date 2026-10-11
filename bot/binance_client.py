@@ -364,7 +364,40 @@ class BinanceMarket:
             bad_close = (close_ms != open_ms + interval_ms - 1).any()
             if misaligned or missing or bad_close:
                 self._candle_metrics["validation_failures"] += 1
-                raise ValueError(f"Misaligned or missing {interval} candles received for {symbol}")
+                diag_parts = []
+                if missing:
+                    diffs = np.diff(open_ms)
+                    gap_indices = np.where(diffs != interval_ms)[0]
+                    gap_samples = [
+                        f"idx {i}->{i+1}: open {open_ms[i]} -> {open_ms[i+1]} (delta={diffs[i]}ms, expected={interval_ms}ms)"
+                        for i in gap_indices[:3]
+                    ]
+                    diag_parts.append(
+                        f"missing/gap: {len(gap_indices)} gap(s) found; samples: [{', '.join(gap_samples)}]"
+                    )
+                if misaligned:
+                    bad_phase = np.where(open_ms % interval_ms != offset_ms)[0]
+                    phase_samples = [
+                        f"idx {i}: open={open_ms[i]} (phase={open_ms[i] % interval_ms}ms, expected={offset_ms}ms)"
+                        for i in bad_phase[:3]
+                    ]
+                    diag_parts.append(
+                        f"misaligned: {len(bad_phase)} candle(s) with bad phase; samples: [{', '.join(phase_samples)}]"
+                    )
+                if bad_close:
+                    bad_close_idx = np.where(close_ms != open_ms + interval_ms - 1)[0]
+                    close_samples = [
+                        f"idx {i}: open={open_ms[i]}, close={close_ms[i]} (expected {open_ms[i] + interval_ms - 1})"
+                        for i in bad_close_idx[:3]
+                    ]
+                    diag_parts.append(
+                        f"bad_close: {len(bad_close_idx)} candle(s); samples: [{', '.join(close_samples)}]"
+                    )
+                details = "; ".join(diag_parts)
+                raise ValueError(
+                    f"Misaligned or missing {interval} candles received for {symbol}: "
+                    f"total_candles={len(df)}, {details}"
+                )
 
         # Store validated closed candles in centralized cache
         # Keep the source rows untouched for exact audit comparisons. Numeric
