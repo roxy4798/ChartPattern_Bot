@@ -47,10 +47,10 @@ class BinanceCandleIntegrityTests(unittest.IsolatedAsyncioTestCase):
                     [list(row) for row in actual.attrs["binance_raw_klines"]],
                     expected,
                 )
-                self.assertEqual(actual["open_time"].astype("int64").tolist(),
-                                 [int(row[0]) * 1_000_000 for row in expected])
-                self.assertEqual(actual["close_time"].astype("int64").tolist(),
-                                 [int(row[6]) * 1_000_000 for row in expected])
+                self.assertEqual(actual["open_time"].dt.as_unit("ms").astype("int64").tolist(),
+                                 [int(row[0]) for row in expected])
+                self.assertEqual(actual["close_time"].dt.as_unit("ms").astype("int64").tolist(),
+                                 [int(row[6]) for row in expected])
                 self.assertEqual(actual["trades"].tolist(), [row[8] for row in expected])
                 self.assertTrue((actual["close_time"] < captured_at).all())
                 for column, index in NUMERIC_FIELDS.items():
@@ -122,8 +122,8 @@ class BinanceCandleIntegrityTests(unittest.IsolatedAsyncioTestCase):
                    return_value=pd.Timestamp("2026-10-20T00:00:00Z")):
             result = await market.get_klines("BTCUSDT", "3d", limit=3)
         self.assertEqual(len(result), 3)
-        opens = result["open_time"].astype("int64").tolist()
-        self.assertEqual([b - a for a, b in zip(opens, opens[1:])], [259_200_000_000_000] * 2)
+        opens = result["open_time"].dt.as_unit("ms").astype("int64").tolist()
+        self.assertEqual([b - a for a, b in zip(opens, opens[1:])], [259_200_000] * 2)
 
     async def test_three_day_missing_candle_fails_closed(self):
         first_open = 1_791_158_400_000

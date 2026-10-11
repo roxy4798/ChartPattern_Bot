@@ -346,8 +346,11 @@ class BinanceMarket:
         # Refuse gaps or inconsistent phases instead of silently compressing time.
         interval_ms = {"1d": 86_400_000, "3d": 259_200_000, "1w": 604_800_000}.get(interval.lower())
         if interval_ms is not None and not df.empty:
-            open_ms = df["open_time"].astype("int64").to_numpy() // 1_000_000
-            close_ms = df["close_time"].astype("int64").to_numpy() // 1_000_000
+            # Pandas may preserve datetime64 resolution based on input units
+            # (milliseconds in Binance rows). Normalize explicitly before
+            # integer arithmetic; astype(int64) alone is resolution-dependent.
+            open_ms = df["open_time"].dt.as_unit("ms").astype("int64").to_numpy()
+            close_ms = df["close_time"].dt.as_unit("ms").astype("int64").to_numpy()
             if interval.lower() == "3d":
                 # Binance documents 3d in UTC but does not specify its phase.
                 # Validate only the 72-hour cadence; do not infer a phase.
