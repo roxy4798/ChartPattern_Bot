@@ -3,6 +3,7 @@ import asyncio
 import logging
 import signal as os_signal
 import sys
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,25 @@ root_logger.addHandler(file_handler)
 
 log = logging.getLogger("main")
 _shutdown = asyncio.Event()
+
+
+def _source_fingerprint() -> tuple[str, str]:
+    """Return a safe source revision and dirty/clean marker for startup logs."""
+    repo = Path(__file__).resolve().parent.parent
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+            capture_output=True, text=True, timeout=2,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=repo, check=True,
+            capture_output=True, text=True, timeout=2,
+        ).stdout
+        if not revision or any(ch.isspace() for ch in revision):
+            return "unknown", "unknown"
+        return revision, "dirty" if status.strip() else "clean"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown", "unknown"
 
 
 async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, square_publisher: Optional[SquarePublisher] = None):
@@ -185,6 +205,14 @@ async def run():
 
     market = BinanceMarket()
     await market.connect()
+    source_commit, source_state = _source_fingerprint()
+    log.info(
+        "Runtime fingerprint | commit=%s | source=%s | Binance=%s | "
+        "STRUCTURAL_FRACTAL_PERIOD=%d | STRUCTURAL_MIN_SPAN=%d | timeframes=%s",
+        source_commit, source_state, "TESTNET" if settings.use_testnet else "MAINNET",
+        settings.structural_fractal_period, settings.structural_min_span,
+        ",".join(settings.timeframes),
+    )
 
     app = build_application(db)
     notifier = Notifier(app, settings.telegram_chat_id)

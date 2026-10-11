@@ -82,7 +82,10 @@ async def check_signal(market: BinanceMarket, db: Database, notifier: Notifier, 
         return
 
     sig_time_ts = pd.to_datetime(signal.signal_time, utc=True)
-    df = df[df["close_time"] >= sig_time_ts].reset_index(drop=True)
+    # The signal candle was already evaluated at its close when the signal was
+    # persisted. Tracking it again can retroactively count pre-confirmation
+    # highs/lows as target or stop hits. Only strictly later closed candles apply.
+    df = df[df["close_time"] > sig_time_ts].reset_index(drop=True)
     if df.empty:
         return
 

@@ -196,31 +196,59 @@ class StructuralFractalConfigurationTests(unittest.TestCase):
 
     def test_signal_and_chart_recalculate_identical_confirmed_pivots(self):
         candles = generate_macro_channel_df(n_bars=500)
-        signal, pattern, _ = evaluate_symbol_timeframe("BTCUSDT", "1d", candles)
-        self.assertIsNotNone(signal)
-        self.assertIsNotNone(pattern)
+        candles["close_time"] = candles["open_time"] + pd.Timedelta(days=1) - pd.Timedelta(milliseconds=1)
         expected = find_structural_pivots(
             candles, fractal_period=30,
             min_pivot_dist=settings.trendline_min_pivot_dist,
         )
 
+        from bot import signal_engine
         from bot import chart_generator
-        captured = {}
+        from matplotlib.axes import Axes
+        captures = {"signal": {}, "chart": {}}
+        chart_markers = []
 
-        def capture_chart_pivots(df, **kwargs):
-            captured["kwargs"] = kwargs
-            captured["data"] = df.copy(deep=True)
-            captured["pivots"] = find_structural_pivots(df, **kwargs)
-            return captured["pivots"]
+        def capture_pivots(component):
+            def capture(df, **kwargs):
+                captures[component]["kwargs"] = kwargs
+                captures[component]["data"] = df.copy(deep=True)
+                captures[component]["pivots"] = find_structural_pivots(df, **kwargs)
+                return captures[component]["pivots"]
+            return capture
 
-        with patch.object(chart_generator, "find_structural_pivots", side_effect=capture_chart_pivots):
+        original_scatter = Axes.scatter
+
+        def capture_scatter(ax, x, y, *args, **kwargs):
+            if kwargs.get("s") == 28:
+                chart_markers.append((x, y, kwargs.get("marker")))
+            return original_scatter(ax, x, y, *args, **kwargs)
+
+        with patch.object(signal_engine, "find_structural_pivots", side_effect=capture_pivots("signal")), \
+             patch.object(chart_generator, "find_structural_pivots", side_effect=capture_pivots("chart")), \
+             patch.object(Axes, "scatter", new=capture_scatter):
+            signal, pattern, _ = evaluate_symbol_timeframe("BTCUSDT", "1d", candles)
+            self.assertIsNotNone(signal)
+            self.assertIsNotNone(pattern)
             png = render_signal_chart(signal.symbol, signal.timeframe, candles, pattern, signal)
 
         self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
-        self.assertEqual(captured["kwargs"]["fractal_period"], 30)
-        self.assertEqual(captured["kwargs"]["min_pivot_dist"], settings.trendline_min_pivot_dist)
-        self.assertEqual(captured["pivots"], expected)
-        pd.testing.assert_frame_equal(captured["data"], candles)
+        for component in ("signal", "chart"):
+            self.assertEqual(captures[component]["kwargs"]["fractal_period"], 30)
+            self.assertEqual(captures[component]["kwargs"]["min_pivot_dist"],
+                             settings.trendline_min_pivot_dist)
+            self.assertEqual(captures[component]["pivots"], expected)
+            pd.testing.assert_frame_equal(captures[component]["data"], candles)
+        self.assertEqual(captures["signal"]["pivots"], captures["chart"]["pivots"])
+        pattern_len = len(candles) - max(0, pattern.start_idx)
+        plot_len = min(len(candles), max(150, pattern_len + 20))
+        offset = len(candles) - plot_len
+        expected_markers = [
+            (max(0, min(plot_len - 1, pivot.index - offset)), pivot.price, marker)
+            for pivots, marker in ((expected[0], "^"), (expected[1], "v"))
+            for pivot in pivots
+            if pattern.start_idx <= pivot.index <= pattern.breakout_idx
+        ]
+        self.assertEqual(chart_markers, expected_markers)
 
 
 if __name__ == "__main__":
