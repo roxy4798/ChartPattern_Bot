@@ -2,6 +2,8 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pandas as pd
+
 from bot.binance_client import BinanceMarket
 from bot.config import settings
 
@@ -60,6 +62,23 @@ class BinanceRetryLoggingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("source=asyncio.timeout deadline", logs.output[-1])
 
+    async def test_rate_limiter_wait_is_covered_by_request_timeout(self):
+        market = self.market([])
+
+        async def stalled_limiter(**kwargs):
+            await asyncio.get_running_loop().create_future()
+
+        market._rate_limiter.acquire.side_effect = stalled_limiter
+        with patch.object(settings, "request_timeout_sec", 0.01), \
+             patch("bot.binance_client.asyncio.sleep", new=AsyncMock()), \
+             self.assertLogs("binance", level="ERROR") as logs:
+            with self.assertRaises(TimeoutError):
+                await market.get_klines("BCHUSDT", "1w", 1)
+
+        self.assertEqual(market._client.futures_klines.await_count, 0)
+        self.assertEqual(market.candle_health()["failures"], 4)
+        self.assertIn("source=asyncio.timeout deadline", logs.output[-1])
+
     async def test_scanner_logs_propagated_request_failure(self):
         from bot import main
 
@@ -90,6 +109,39 @@ class BinanceRetryLoggingTests(unittest.IsolatedAsyncioTestCase):
                             for call in db.set_metadata.await_args_list))
         self.assertFalse(any(call.args[0] == "last_successful_scan_at"
                              for call in db.set_metadata.await_args_list))
+
+    async def test_scanner_surfaces_non_binance_pair_exception(self):
+        from bot import main
+
+        market = AsyncMock()
+        market.get_symbol_universe.return_value = ["BCHUSDT"]
+        market.get_klines.return_value = pd.DataFrame({"close": [1.0] * 220})
+        market.candle_health = MagicMock(return_value={
+            "requests": 1, "failures": 0, "recovered": 0, "exhausted": 0,
+            "validation_failures": 0, "cache_hits": 0, "last_successful_fetch_at": "now",
+        })
+        db = AsyncMock()
+        db.get_active_signals.return_value = []
+
+        async def finish_scan(awaitable, *args, **kwargs):
+            awaitable.close()
+            main._shutdown.set()
+            raise asyncio.TimeoutError()
+
+        with patch.object(main, "_shutdown", asyncio.Event()), \
+             patch.object(settings, "timeframes", ["1w"]), \
+             patch.object(settings, "scanner_concurrency", 1), \
+             patch.object(main, "evaluate_symbol_timeframe", side_effect=ValueError("bad candle frame")), \
+             patch.object(main.asyncio, "wait_for", side_effect=finish_scan), \
+             self.assertLogs("main", level="WARNING") as logs:
+            await main.scan_loop(market, db, AsyncMock())
+
+        self.assertTrue(any("Scan pair failed for BCHUSDT 1w (ValueError: bad candle frame)" in line
+                            for line in logs.output))
+        self.assertTrue(any(call.args[0] == "last_scan_pair_failures" and call.args[1] == "1"
+                            for call in db.set_metadata.await_args_list))
+        self.assertTrue(any(call.args[0] == "binance_failures" and call.args[1] == "0"
+                            for call in db.set_metadata.await_args_list))
 
 
 if __name__ == "__main__":

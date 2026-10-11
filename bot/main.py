@@ -156,11 +156,18 @@ async def scan_loop(market: BinanceMarket, db: Database, notifier: Notifier, squ
                             log.warning("[%s] Scan request failed for %s %s (%s: %s)",
                                         scan_id, symbol, tf, type(exc).__name__, exc)
                         else:
-                            log.debug("[%s] Scan check skipped for %s %s (%s)",
-                                      scan_id, symbol, tf, type(exc).__name__)
+                            log.warning("[%s] Scan pair failed for %s %s (%s: %s)",
+                                        scan_id, symbol, tf, type(exc).__name__, exc,
+                                        exc_info=True)
 
             tasks = [_check_symbol(sym) for sym in symbols]
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for symbol, result in zip(symbols, results):
+                if isinstance(result, BaseException):
+                    pair_failures += 1
+                    log.error("[%s] Scanner task failed for %s (%s: %s)",
+                              scan_id, symbol, type(result).__name__, result,
+                              exc_info=(type(result), result, result.__traceback__))
 
             await db.set_metadata("last_scan_at", scan_start.isoformat())
             await db.set_metadata("scan_symbols_count", str(len(symbols)))
