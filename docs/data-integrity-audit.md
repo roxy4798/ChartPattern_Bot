@@ -70,7 +70,7 @@ printf '\nEffective safe configuration fields:\n'
 RUN_PYTHON=python
 if [ -x .venv/bin/python ]; then RUN_PYTHON=.venv/bin/python; fi
 if [ -x venv/bin/python ]; then RUN_PYTHON=venv/bin/python; fi
-PYTHONPATH="$PWD" "$RUN_PYTHON" - <<'PY'
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD" "$RUN_PYTHON" - <<'PY'
 from bot.config import settings
 market = "UNKNOWN" if not isinstance(settings.use_testnet, bool) else ("TESTNET" if settings.use_testnet else "MAINNET")
 print(f"BINANCE_ENV={market}")
@@ -111,26 +111,17 @@ PY
 
 This is a read-only spot check. Compare host/server skew with normal NTP tolerance and repeat if round trip is high. A single response does not prove long-term clock health.
 
-## GitHub Actions authorization
+## GitHub Actions authorization and result
 
-The regression workflow is present locally in `.github/workflows/tests.yml`, but GitHub rejected publishing it because this GitHub CLI OAuth grant lacks `workflow` scope. The repository owner can authorize the scope through GitHub CLI:
+The repository owner authorized the GitHub CLI `workflow` OAuth scope through the browser while signed in as `roxy4798`. `gh auth status --hostname github.com` showed the `workflow` scope, and `gh api user --jq .login` returned `roxy4798`. No alternate account or permission bypass was used.
 
-```bash
-gh auth refresh --hostname github.com --scopes workflow
-gh auth status
-```
+The regression workflow is committed at `.github/workflows/tests.yml`. On PR #1 head `6958805875e04761375f31dfdbe62f4e23980a2c`, both GitHub Actions triggers passed:
 
-Complete the GitHub authorization in the browser and verify `workflow` appears in the granted scopes. Then publish the existing workflow and run it on the exact PR head (the regression command now includes the persistence/tracker and runtime fingerprint tests):
+- Push run: https://github.com/roxy4798/ChartPattern_Bot/actions/runs/38122210614 (29 seconds).
+- Pull request run: https://github.com/roxy4798/ChartPattern_Bot/actions/runs/38122212318 (31 seconds).
 
-```bash
-git add .github/workflows/tests.yml
-git commit -m "ci: run regression suite"
-git push origin fix/binance-timeout-diagnostics
-gh pr checks 1 --watch
-```
-
-Do not use a different token, account, API or UI path to circumvent the scope rejection. Until the owner authorizes it and the run succeeds, CI is NOT RUN.
+CI found two issues before passing: `colorama` was missing from runtime requirements, and timestamp validation assumed nanosecond storage although current pandas preserves millisecond resolution for Binance timestamps. Both defects were fixed and the tests normalize explicitly to milliseconds. The latest Actions jobs ran compileall and the regression suite on the exact head above.
 
 ## Rollout gate
 
-Keep production on the existing version until (1) 3d candle opens and OHLCV are matched to the official Futures chart for several symbols with different observed phases and matching timezone, (2) production process/configuration and NTP synchronization are verified, (3) CI passes on the PR branch, and (4) a controlled rollback and post-deploy data-health check are prepared. No deployment or PR merge is authorized by this document.
+Keep production on the existing version until (1) 3d candle opens and OHLCV are matched to the official Futures chart for several symbols with different observed phases and matching timezone, (2) production process/configuration and NTP synchronization are verified, and (3) a controlled rollback and post-deploy data-health check are prepared. PR CI passes, but that does not remove the remaining chart-parity and production-verification gates. No deployment or PR merge is authorized by this document.
