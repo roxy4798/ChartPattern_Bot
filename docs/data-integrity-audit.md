@@ -78,6 +78,7 @@ print(f"STRUCTURAL_FRACTAL_PERIOD={settings.structural_fractal_period}")
 print(f"STRUCTURAL_MIN_SPAN={settings.structural_min_span}")
 print(f"TIMEFRAMES={','.join(settings.timeframes)}")
 print(f"SYMBOL_MODE={settings.symbol_mode}")
+print(f"DB_PATH={settings.db_path}")
 PY
 printf '\nDifferences in checkout from its current commit:\n'
 git diff --stat HEAD
@@ -90,6 +91,41 @@ The latest code logs a startup fingerprint containing Git commit, clean/dirty ma
 grep -E 'Runtime fingerprint \|' bot/data/bot.log | tail -n 5
 grep -E 'Connected to Binance Futures API \(testnet=' bot/data/bot.log | tail -n 5
 ```
+
+Read the persisted fetch and cycle metadata without opening the database for writes. The URI is explicitly read-only and query-only; if SQLite cannot open the live WAL read-only, stop and report that metadata as unavailable rather than switching to a writable connection.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD" "$RUN_PYTHON" - <<'PY'
+import sqlite3
+from pathlib import Path
+from bot.config import settings
+
+keys = (
+    "binance_last_successful_fetch_at",
+    "last_scan_finished_at", "last_successful_scan_at",
+    "last_scan_pairs_checked", "last_scan_pair_failures",
+    "last_tracker_heartbeat_at", "last_tracker_success_at",
+    "last_tracker_failures", "tracker_active_count",
+)
+uri = Path(settings.db_path).resolve().as_uri() + "?mode=ro"
+db = sqlite3.connect(uri, uri=True, timeout=3)
+try:
+    db.execute("PRAGMA query_only=ON")
+    marks = ",".join("?" for _ in keys)
+    rows = db.execute(
+        f"SELECT key, value, updated_at FROM system_metadata WHERE key IN ({marks}) ORDER BY key",
+        keys,
+    ).fetchall()
+    for key, value, updated_at in rows:
+        print(f"{key}={value} (updated_at={updated_at})")
+    if not rows:
+        print("metadata_rows=none")
+finally:
+    db.close()
+PY
+```
+
+The `last_tracker_heartbeat_at` timestamp proves only that the loop ran. Use `last_tracker_success_at` and `last_tracker_failures` separately; the same distinction applies to scanner finish versus successful scanner cycle. A missing or stale successful-fetch timestamp is not evidence of current Binance data.
 
 Check clock synchronization without changing it:
 
@@ -115,12 +151,12 @@ This is a read-only spot check. Compare host/server skew with normal NTP toleran
 
 The repository owner authorized the GitHub CLI `workflow` OAuth scope through the browser while signed in as `roxy4798`. `gh auth status --hostname github.com` showed the `workflow` scope, and `gh api user --jq .login` returned `roxy4798`. No alternate account or permission bypass was used.
 
-The regression workflow is committed at `.github/workflows/tests.yml`. On PR #1 head `6958805875e04761375f31dfdbe62f4e23980a2c`, both GitHub Actions triggers passed:
+The regression workflow is committed at `.github/workflows/tests.yml`. The source/test commit `6958805875e04761375f31dfdbe62f4e23980a2c` passed both Actions triggers. The later documentation commit `fad95ca78c8c2a08a0a03cc6cd7de30b089d544f` also passed both triggers:
 
-- Push run: https://github.com/roxy4798/ChartPattern_Bot/actions/runs/38122210614 (29 seconds).
-- Pull request run: https://github.com/roxy4798/ChartPattern_Bot/actions/runs/38122212318 (31 seconds).
+- Push run: https://github.com/roxy4798/ChartPattern_Bot/actions/runs/38122299235 (36 seconds).
+- Pull request run: https://github.com/roxy4798/ChartPattern_Bot/actions/runs/38122302267 (26 seconds).
 
-CI found two issues before passing: `colorama` was missing from runtime requirements, and timestamp validation assumed nanosecond storage although current pandas preserves millisecond resolution for Binance timestamps. Both defects were fixed and the tests normalize explicitly to milliseconds. The latest Actions jobs ran compileall and the regression suite on the exact head above.
+CI found two issues before passing: `colorama` was missing from runtime requirements, and timestamp validation assumed nanosecond storage although current pandas preserves millisecond resolution for Binance timestamps. Both defects were fixed and the tests normalize explicitly to milliseconds. These linked runs are historical commit-specific evidence; always verify that an Actions `headSha` equals the current remote PR head before treating CI as current.
 
 ## Rollout gate
 
