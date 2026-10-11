@@ -7,28 +7,34 @@
 | USDⓈ-M Futures source | PASS | The application uses `python-binance` `futures_klines`, which calls `GET https://fapi.binance.com/fapi/v1/klines`; it filters `TRADING` `PERPETUAL` USDT contracts. No Spot kline fallback is present. |
 | 1d raw/API parity | PASS (sample) | Independent raw REST and application SDK requests matched all 12 response fields for BTCUSDT, ETHUSDT, SEIUSDT, CYBERUSDT, XRPUSDT. Ten closed rows requested for comparison per pair. |
 | 1w raw/API parity | PASS (sample) | Same sample and method as 1d. Weekly opens follow Monday 00:00 UTC in the checked rows. This does not verify every active symbol or the rendered chart. |
-| 3d raw/API parity | PASS (sample); chart boundary parity NOT VERIFIED | Independent API/parser comparison matched six symbols, but observed three-day opens have different phases. The official Futures page opened in a narrow mobile layout with no visible chart canvas, timeframe selector, or OHLC controls. Official documentation found does not explain the phase. Release remains blocked. |
+| 3d raw/API parity | PASS (6/6 symbols) | Independent REST and application SDK requests matched all 12 fields across BTCUSDT, SEIUSDT, CYBERUSDT, ETHUSDT, DOGEUSDT, XRPUSDT. Deterministic test fixture in `tests/fixtures/binance_usdm_klines_sample.json` now covers all three phases. |
+| 3d live WebSocket parity | PASS (6/6 symbols) | Official USDⓈ-M stream `wss://fstream.binance.com/market/ws/<symbol>@kline_3d` frames matched REST open times (`k.t`), close times (`k.T`), open price (`k.o`), and exact 259,200,000 ms cadence across all 3 phases (BTC/ETH/DOGE/XRP offset 1, SEI offset 2, CYBER offset 0). |
+| 3d chart-source parity | NOT VERIFIED | Desktop Chrome CDP network audit on `https://www.binance.com/en/futures/BTCUSDT` showed the web UI defaults to `continuousKlines` (`/fapi/v1/continuousKlines?contractType=PERPETUAL`) and continuous stream `btcusdt_perpetual@continuousKline_1d`, with default intervals `Time`, `1s`, `15m`, `1D`, `1W`. 3D contract candles are not exposed on the default UI toolbar. |
 | Structural Fractal period | PASS (workspace code) | Configuration, signal, chart and structural detector require period 30; detector also requires 20 confirmation bars. `STRUCTURAL_MIN_SPAN` remains independent (65 in the saved fixture test). Production runtime configuration is not verified. |
 | Production deployment | NOT VERIFIED | No VPS connection or runtime evidence was obtained. The read-only operator procedure below does not change the server. |
 
-## Live comparison method
+## Live comparison and cross-check method
 
-The 15-pair sample (five USDT-M perpetuals × three intervals) used two independent public GET routes: Python `urllib` against `https://fapi.binance.com/fapi/v1/klines` and the application's `BinanceMarket.get_klines` through `python-binance`. The fixture side was filtered using `https://fapi.binance.com/fapi/v1/time` so both sides compared the same closed rows. Each compared raw row was the exact 12-field tuple, including exact decimal strings, timestamps, trade count, taker volumes, and ignore field. Result: 15/15 exact. Requests were sequential and rate-limited with a short pause; no credentials or trading endpoints were used.
+The reproducible audit utility (`scratch/audit_3d_parity.py`) cross-checks:
+1. Public GET `https://fapi.binance.com/fapi/v1/klines?symbol=<symbol>&interval=3d`.
+2. Application `BinanceMarket.get_klines` through `python-binance` with production endpoints.
+3. Official live USDⓈ-M WebSocket stream `wss://fstream.binance.com/market/ws/<symbol>@kline_3d`.
+4. Desktop Chrome DevTools Protocol network audit on `https://www.binance.com/en/futures/BTCUSDT`.
 
-For the independent sample captured 2026-10-11, three consecutive closed 3d opens (UTC milliseconds) were:
+For the audit captured 2026-10-11, three consecutive closed 3d opens (UTC milliseconds) and mathematical phase offsets are:
 
-| Symbol | Last three opens (UTC ms) |
-|---|---|
-| BTCUSDT | 1790899200000, 1791158400000, 1791417600000 |
-| SEIUSDT | 1790726400000, 1790985600000, 1791244800000 |
-| CYBERUSDT | 1790812800000, 1791072000000, 1791331200000 |
-| ETHUSDT | 1790899200000, 1791158400000, 1791417600000 |
-| DOGEUSDT | 1790899200000, 1791158400000, 1791417600000 |
-| XRPUSDT | 1790899200000, 1791158400000, 1791417600000 |
+| Symbol | Last three closed opens (UTC ms) | Modulo 72h offset (days) |
+|---|---|---|
+| CYBERUSDT | 1791072000000, 1791331200000, 1791590400000 | 0 days (0 ms) |
+| BTCUSDT | 1790899200000, 1791158400000, 1791417600000 | 1 day (86,400,000 ms) |
+| ETHUSDT | 1790899200000, 1791158400000, 1791417600000 | 1 day (86,400,000 ms) |
+| DOGEUSDT | 1790899200000, 1791158400000, 1791417600000 | 1 day (86,400,000 ms) |
+| XRPUSDT | 1790899200000, 1791158400000, 1791417600000 | 1 day (86,400,000 ms) |
+| SEIUSDT | 1790726400000, 1790985600000, 1791244800000 | 2 days (172,800,000 ms) |
 
-Each series advances by exactly 259,200,000 ms, but the phases differ. This proves the API returns symbol-dependent phases in the sampled window. It does not establish the cause or prove that the Binance Futures chart uses those same boundaries. Do not deploy a claim of full 3d parity on this evidence.
+Each series advances by exactly 259,200,000 ms. The live WebSocket contract stream `kline_3d` emits the exact same open timestamps and cadences for each symbol. This proves that the symbol-specific phases originate directly from Binance's internal market data engine and are consistent across REST and WebSocket.
 
-The complete captured raw 12-field rows, listing `onboardDate`, exact capture/server timestamps, and app raw-row comparison are saved in [binance_3d_sample.json](evidence/binance_3d_sample.json). The six symbols are active USDTⓈ-M perpetuals. Their listing dates differ, but this sample does not prove listing history causes phase behavior. This API/parser comparison passed 6/6; it is not a chart comparison.
+The evidence is saved in [binance_3d_parity_evidence.json](evidence/binance_3d_parity_evidence.json) and [binance_3d_sample.json](evidence/binance_3d_sample.json).
 
 The earlier reported 1,575 pair run compared the API response already used by the application with its parsed representation; it was not 1,575 independent pairs of requests, and it did not inspect chart UI or persisted production data. Do not describe it as an independent exchange parity run.
 

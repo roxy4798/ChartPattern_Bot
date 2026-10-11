@@ -116,14 +116,23 @@ class BinanceCandleIntegrityTests(unittest.IsolatedAsyncioTestCase):
                 await market.get_klines("BTCUSDT", "1d", limit=2)
 
     async def test_three_day_rows_require_cadence_without_phase_assumption(self):
-        rows = FIXTURE["fixtures"]["BTCUSDT:3d"]
-        market = self.market(rows)
-        with patch("bot.binance_client.pd.Timestamp.now",
-                   return_value=pd.Timestamp("2026-10-20T00:00:00Z")):
-            result = await market.get_klines("BTCUSDT", "3d", limit=3)
-        self.assertEqual(len(result), 3)
-        opens = result["open_time"].dt.as_unit("ms").astype("int64").tolist()
-        self.assertEqual([b - a for a, b in zip(opens, opens[1:])], [259_200_000] * 2)
+        # Verify all three distinct 3D phases (offset 0, 1, and 2 days) are accepted
+        phase_offsets = {}
+        for symbol in ["BTCUSDT", "SEIUSDT", "CYBERUSDT"]:
+            rows = FIXTURE["fixtures"][f"{symbol}:3d"]
+            market = self.market(rows)
+            with patch("bot.binance_client.pd.Timestamp.now",
+                       return_value=pd.Timestamp("2026-10-20T00:00:00Z")):
+                result = await market.get_klines(symbol, "3d", limit=3)
+            self.assertEqual(len(result), 3)
+            opens = result["open_time"].dt.as_unit("ms").astype("int64").tolist()
+            self.assertEqual([b - a for a, b in zip(opens, opens[1:])], [259_200_000] * 2)
+            phase_offsets[symbol] = (opens[0] % 259_200_000) // 86_400_000
+
+        # Assert all three distinct mathematical phases (0, 1, 2) are represented
+        self.assertEqual(phase_offsets["CYBERUSDT"], 0)
+        self.assertEqual(phase_offsets["BTCUSDT"], 1)
+        self.assertEqual(phase_offsets["SEIUSDT"], 2)
 
     async def test_three_day_missing_candle_fails_closed(self):
         first_open = 1_791_158_400_000
